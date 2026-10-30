@@ -896,6 +896,9 @@ struct PersonPatch {
     display_name: Option<String>,
     status: Option<String>,
     note: Option<String>,
+    /// 各场景里的称呼（mc/qq/qq_group/live）。空串 = 删掉人工值、回落自动推导。
+    /// 场景称呼的编辑入口在这里（身份），关系页只读展示。
+    scenes: Option<std::collections::HashMap<String, String>>,
 }
 
 /// 改身份。可以改显示名、状态、备注。
@@ -910,6 +913,9 @@ async fn api_patch_person(
         if n.trim().is_empty() {
             return Err(Error::BadRequest("显示名不能为空".into()));
         }
+    }
+    if let Some(scenes) = &p.scenes {
+        check_scenes(scenes)?;
     }
     let db = st.app.db.clone();
     let id2 = id.clone();
@@ -931,6 +937,9 @@ async fn api_patch_person(
                  WHERE person_id = ?4",
                 rusqlite::params![p.display_name, p.status, p.note, id2],
             )?;
+            if let Some(scenes) = &p.scenes {
+                write_scenes(tx, &id2, scenes, crate::db::now_ms())?;
+            }
             Ok(())
         })
     })

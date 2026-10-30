@@ -404,6 +404,9 @@ pub struct PersonItem {
     pub note: Option<String>,
     /// 这个人在这几个渠道上有账号。面板上要能看出一对多。
     pub accounts: Vec<AccountItem>,
+    /// 各场景里的称呼（人工设置优先，否则按渠道账号/群消息推导）。
+    /// 场景称呼的编辑入口在「身份」页——关系页只展示。
+    pub scenes: Vec<SceneItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -449,6 +452,7 @@ pub fn persons(db: &Db, q: Option<&str>, p: Page) -> Result<Paged<PersonItem>> {
                         created_ms: r.get(3)?,
                         note: r.get(4)?,
                         accounts: Vec::new(),
+                        scenes: Vec::new(),
                     })
                 },
             )?
@@ -471,6 +475,11 @@ pub fn persons(db: &Db, q: Option<&str>, p: Page) -> Result<Paged<PersonItem>> {
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+        }
+        // 场景称呼一次查全（人 → 场景 → 名字），不在循环里按人查。
+        let scene_data = load_scene_data(c)?;
+        for person in items.iter_mut() {
+            person.scenes = scenes_for(&person.person_id, &scene_data);
         }
         Ok(Paged::new(items, total, p))
     })
@@ -801,6 +810,135 @@ pub fn is_person_scene(scene: &str) -> bool {
     PERSON_SCENES.iter().any(|(k, _)| *k == scene)
 }
 
+/// 场景称呼的原料：一次查全，避免按人 N+1。
+struct SceneData {
+    /// (person_id, scene) → 人工设置的名字
+    manual: std::collections::HashMap<(String, String), String>,
+    /// 人 → [(渠道, 账号, 该渠道名字)]
+    accounts: std::collections::HashMap<String, Vec<(String, String, Option<String>)>>,
+    /// 人 → QQ 群名片（取最近一条群消息）
+    group_names: std::collections::HashMap<String, String>,
+}
+
+fn load_scene_data(c: &rusqlite::Connection) -> Result<SceneData> {
+    let mut manual = std::collections::HashMap::new();
+    {
+        let mut s = c.prepare("SELECT person_id, scene, name FROM person_scene")?;
+        let rows = s.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (pid, scene, name) = row?;
+            manual.insert((pid, scene), name);
+        }
+    }
+
+    let mut accounts: std::collections::HashMap<String, Vec<(String, String, Option<String>)>> =
+        std::collections::HashMap::new();
+    {
+        let mut s = c.prepare(
+            "SELECT person_id, channel, account, seen_name
+             FROM person_account ORDER BY channel, last_seen_ms DESC",
+        )?;
+        let rows = s.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (pid, channel, account, seen) = row?;
+            accounts
+                .entry(pid)
+                .or_default()
+                .push((channel, account, seen));
+        }
+    }
+
+    // QQ 群名片：同一个 QQ 号在不同群可能不同，取最近一句的发送者名。
+    let mut group_names = std::collections::HashMap::new();
+    {
+        let mut s = c.prepare(
+            "SELECT person_id, sender_name FROM (
+               SELECT pa.person_id AS person_id, cm.sender_name AS sender_name,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY pa.person_id ORDER BY cm.at_ms DESC
+                      ) AS rn
+               FROM person_account pa
+               JOIN channel_message cm
+                 ON cm.channel = 'qq' AND cm.account = pa.account
+               WHERE pa.channel = 'qq'
+                 AND cm.group_id IS NOT NULL
+                 AND cm.sender_name IS NOT NULL AND cm.sender_name <> ''
+                 AND cm.deleted_by IS NULL
+             ) WHERE rn = 1",
+        )?;
+        let rows = s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (pid, name) = row?;
+            group_names.insert(pid, name);
+        }
+    }
+
+    Ok(SceneData {
+        manual,
+        accounts,
+        group_names,
+    })
+}
+
+/// 组装一个人的四个场景称呼：人工设置 > 渠道账号/群名片 > 不知道。
+fn scenes_for(person_id: &str, data: &SceneData) -> Vec<SceneItem> {
+    let mut out = Vec::with_capacity(PERSON_SCENES.len());
+    for (key, label) in PERSON_SCENES {
+        let scene = (*key).to_string();
+        let label = (*label).to_string();
+        if let Some(name) = data.manual.get(&(person_id.to_string(), scene.clone())) {
+            out.push(SceneItem {
+                scene,
+                label,
+                name: Some(name.clone()),
+                source: "manual".into(),
+                hint: None,
+            });
+            continue;
+        }
+        let derived = match *key {
+            // QQ 群名片没有账号可当提示，hint 留空。
+            "qq_group" => data
+                .group_names
+                .get(person_id)
+                .cloned()
+                .map(|n| (n, String::new())),
+            ch => data.accounts.get(person_id).and_then(|list| {
+                list.iter()
+                    .find(|(channel, _, _)| channel == ch)
+                    .and_then(|(_, account, seen)| seen.clone().map(|n| (n, account.clone())))
+            }),
+        };
+        let (name, hint) = match derived {
+            // 空串转 None：群名片那条没有账号可给，面板上「提示」那一栏
+            // 不该显示成一个空的 Some("")。
+            Some((n, a)) => (Some(n), if a.is_empty() { None } else { Some(a) }),
+            None => (None, None),
+        };
+        out.push(SceneItem {
+            scene,
+            label,
+            name: name.clone(),
+            source: if name.is_some() { "derived" } else { "none" }.into(),
+            hint,
+        });
+    }
+    out
+}
+
 pub fn relations(db: &Db) -> Result<Vec<RelationItem>> {
     db.with_read(|c| {
         let mut stmt = c.prepare(
@@ -830,117 +968,9 @@ pub fn relations(db: &Db) -> Result<Vec<RelationItem>> {
         if items.is_empty() {
             return Ok(items);
         }
-
-        // ---- 人工设置过的称呼
-        let mut manual: std::collections::HashMap<(String, String), String> =
-            std::collections::HashMap::new();
-        {
-            let mut s = c.prepare("SELECT person_id, scene, name FROM person_scene")?;
-            let rows = s.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?;
-            for row in rows {
-                let (pid, scene, name) = row?;
-                manual.insert((pid, scene), name);
-            }
-        }
-
-        // ---- 渠道账号（MC / QQ / 直播）里的名字
-        // (人 → [(渠道, 账号, 该渠道名字)])，同一个渠道一般只有一个账号。
-        type AccountRow = (String, String, Option<String>);
-        let mut accounts: std::collections::HashMap<String, Vec<AccountRow>> =
-            std::collections::HashMap::new();
-        {
-            let mut s = c.prepare(
-                "SELECT person_id, channel, account, seen_name
-                 FROM person_account ORDER BY channel, last_seen_ms DESC",
-            )?;
-            let rows = s.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (pid, channel, account, seen) = row?;
-                accounts
-                    .entry(pid)
-                    .or_default()
-                    .push((channel, account, seen));
-            }
-        }
-
-        // ---- QQ 群名片：同一个 QQ 号在不同群可能不同，取最近一句的发送者名
-        let mut group_names: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        {
-            let mut s = c.prepare(
-                "SELECT person_id, sender_name FROM (
-                   SELECT pa.person_id AS person_id, cm.sender_name AS sender_name,
-                          ROW_NUMBER() OVER (
-                            PARTITION BY pa.person_id ORDER BY cm.at_ms DESC
-                          ) AS rn
-                   FROM person_account pa
-                   JOIN channel_message cm
-                     ON cm.channel = 'qq' AND cm.account = pa.account
-                   WHERE pa.channel = 'qq'
-                     AND cm.group_id IS NOT NULL
-                     AND cm.sender_name IS NOT NULL AND cm.sender_name <> ''
-                     AND cm.deleted_by IS NULL
-                 ) WHERE rn = 1",
-            )?;
-            let rows = s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-            for row in rows {
-                let (pid, name) = row?;
-                group_names.insert(pid, name);
-            }
-        }
-
-        // ---- 组装
+        let data = load_scene_data(c)?;
         for item in items.iter_mut() {
-            let pid = item.person_id.clone();
-            for (key, label) in PERSON_SCENES {
-                let scene = (*key).to_string();
-                let label = (*label).to_string();
-                if let Some(name) = manual.get(&(pid.clone(), scene.clone())) {
-                    item.scenes.push(SceneItem {
-                        scene,
-                        label,
-                        name: Some(name.clone()),
-                        source: "manual".into(),
-                        hint: None,
-                    });
-                    continue;
-                }
-                let derived = match *key {
-                    // QQ 群名片没有账号可当提示，hint 留空。
-                    "qq_group" => group_names.get(&pid).cloned().map(|n| (n, String::new())),
-                    ch => accounts.get(&pid).and_then(|list| {
-                        list.iter().find(|(channel, _, _)| channel == ch).and_then(
-                            |(_, account, seen)| seen.clone().map(|n| (n, account.clone())),
-                        )
-                    }),
-                };
-                let (name, hint) = match derived {
-                    // 空串转 None：群名片那条没有账号可给，面板上「提示」
-                    // 那一栏不该显示成一个空的 Some("")
-                    Some((n, a)) => (Some(n), if a.is_empty() { None } else { Some(a) }),
-                    None => (None, None),
-                };
-                item.scenes.push(SceneItem {
-                    scene,
-                    label,
-                    name: name.clone(),
-                    source: if name.is_some() { "derived" } else { "none" }.into(),
-                    hint,
-                });
-            }
+            item.scenes = scenes_for(&item.person_id, &data);
         }
         Ok(items)
     })

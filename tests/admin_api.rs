@@ -902,3 +902,74 @@ async fn 新建关系时显示名不能为空() {
         .unwrap();
     assert_eq!(r.status(), 400);
 }
+
+#[tokio::test]
+async fn 身份可以改各场景称呼() {
+    // 场景称呼的编辑入口在「身份」页；关系页只读展示同一份数据。
+    let s = S::start().await;
+    seed_person(&s.db, "p1", "小红", &[("mc", "uuid-1", Some("小红MC"))]);
+    let ck = s.login().await;
+
+    // 初始：MC 自动推导，QQ 群没有来源
+    let j: serde_json::Value = s
+        .get_with("/api/admin/persons", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let scenes = j["items"][0]["scenes"].as_array().unwrap();
+    let mc = scenes.iter().find(|x| x["scene"] == "mc").unwrap();
+    assert_eq!(mc["name"], "小红MC");
+    assert_eq!(mc["source"], "derived");
+
+    // 人工填两个场景；空串保持自动
+    let r = S::client()
+        .patch(format!("{}/api/admin/person/p1", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"scenes": {
+            "mc": "游戏里的小红",
+            "qq_group": "群名片小红",
+            "qq": ""
+        }}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let j: serde_json::Value = s
+        .get_with("/api/admin/persons", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let scenes = j["items"][0]["scenes"].as_array().unwrap();
+    let pick = |k: &str| scenes.iter().find(|x| x["scene"] == k).unwrap().clone();
+    assert_eq!(pick("mc")["name"], "游戏里的小红");
+    assert_eq!(pick("mc")["source"], "manual");
+    assert_eq!(pick("qq_group")["name"], "群名片小红");
+    assert_eq!(pick("qq")["source"], "none", "空串不该写进库");
+}
+
+#[tokio::test]
+async fn 身份场景称呼拒绝未知键与未登录() {
+    let s = S::start().await;
+    seed_person(&s.db, "p1", "小红", &[]);
+    let ck = s.login().await;
+
+    let r = S::client()
+        .patch(format!("{}/api/admin/person/p1", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"scenes": {"telegram": "x"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+
+    let r = S::client()
+        .patch(format!("{}/api/admin/person/p1", s.base))
+        .json(&serde_json::json!({"scenes": {"mc": "x"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+}

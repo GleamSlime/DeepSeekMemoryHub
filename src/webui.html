@@ -712,10 +712,11 @@ async function renderTable(c, page){
       <td>${m.consumed ? '<span class="badge b-ok">是</span>' : '<span class="badge b-extracted">未</span>'}</td>
     </tr>`).join('');
   } else if(page==='persons'){
-    head='<tr><th>显示名</th><th>状态</th><th>渠道账号</th><th>首次出现</th></tr>';
+    head='<tr><th>显示名</th><th>状态</th><th>各场景里的称呼</th><th>渠道账号</th><th>首次出现</th></tr>';
     rows=items.map(p=>`<tr style="cursor:pointer" data-ps='${esc(JSON.stringify(p))}'>
       <td><b>${esc(p.display_name)}</b></td>
       <td><span class="badge ${p.status==='confirmed'?'b-ok':'b-warn'}">${p.status==='confirmed'?'已确认':'待确认'}</span></td>
+      <td>${sceneLine(p.scenes)}</td>
       <td>${p.accounts.map(a=>chantBadge(a.channel)+' <span class="mono dim">'+esc(a.account.slice(0,14))+'</span>').join(' ')}</td>
       <td class="mono dim nowrap">${fmtTime(p.first_seen_ms||p.created_ms)}</td></tr>`).join('');
   }
@@ -903,9 +904,25 @@ async function renderTable(c, page){
         </span>
       </div>
       <div class="editrow">
-        <label>备注</label>
-        <input id="psNote" value="${esc(p.note||'')}" placeholder="可空">
+        <label>身份备注 <span class="dim">（这人是谁；关系里发生的事写在关系页）</span></label>
+        <input id="psNote" value="${esc(p.note||'')}" placeholder="可空，例如「服务器服主」">
       </div>
+
+      <div class="sectitle">各场景里的称呼 <span class="hint">留空 = 自动跟随渠道账号/群消息</span></div>
+      <p class="dim" style="font-size:11.5px;margin:0 0 10px">
+        同一个人在不同地方被叫的名字不一样。这里填了就以这里为准；
+        留空则按渠道账号、QQ 群名片自动推导（自动值显示成灰色提示）。
+      </p>
+      ${(p.scenes||[]).map(sc=>{
+        const auto = sc.name
+          ? `当前${sc.source==='manual'?'人工':'自动'}：${esc(sc.name)}${sc.hint?`（${esc(sc.hint)}）`:''}`
+          : '暂无来源';
+        return `<div class="editrow">
+          <label>${esc(sc.label)} <span class="dim">${auto}</span></label>
+          <input id="psSc_${esc(sc.scene)}" value="${esc(sc.source==='manual'?(sc.name||''):'')}" placeholder="留空 = 自动">
+        </div>`;
+      }).join('')}
+
       <div class="sectitle">只读</div>
       <div class="kv">
         <div class="k">ID</div><div class="v mono">${esc(p.person_id)}</div>
@@ -949,12 +966,15 @@ async function renderTable(c, page){
     $('psSave').onclick=async()=>{
       const st=$('psStatus').querySelector('button.on');
       try{
+        const scenes={};
+        (p.scenes||[]).forEach(sc=>{ const el=$('psSc_'+sc.scene); if(el) scenes[sc.scene]=el.value; });
         const r=await fetch(`/api/admin/person/${encodeURIComponent(p.person_id)}`,{
           method:'PATCH',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({
             display_name: $('psName').value,
             status: st ? st.dataset.v : undefined,
-            note: $('psNote').value
+            note: $('psNote').value,
+            scenes
           })});
         if(!r.ok){ let m=r.status+''; try{const j=await r.json(); if(j.error)m=j.error;}catch(_){} toast('保存失败：'+m,true); return; }
         toast('已保存'); closeDrawer(); render();
@@ -974,6 +994,16 @@ async function renderTable(c, page){
       }catch(e){ toast('绑定失败：'+e.message,true); }
     };
   });
+
+  // 从关系页的「去身份页改称呼」跳过来：直接把那个人的抽屉打开。
+  if(page==='persons' && state.pendingPerson){
+    const want=state.pendingPerson;
+    state.pendingPerson=null;
+    const hit=[...c.querySelectorAll('[data-ps]')].find(x=>{
+      try{ return JSON.parse(x.dataset.ps).person_id===want; }catch(_){ return false; }
+    });
+    if(hit) hit.click();
+  }
 
   const bn=$('btnNew');
   if(bn) bn.onclick=()=>openCreate(page);
@@ -1494,7 +1524,8 @@ async function renderRelations(c){
     return;
   }
   c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
-    亲密度决定它怎么对待这个人（陌生→认识→熟识→亲近→交心）。点一行可以改数值、备注和各场景里的称呼。
+    亲密度决定它怎么对待这个人（陌生→认识→熟识→亲近→交心）。点一行可以改数值与关系备注；
+    各场景里的称呼来自「身份」页（这里只读展示）。
   </p>
   <div class="tablewrap">
     <div class="tbl-head"><span class="t">关系</span>
@@ -1553,12 +1584,14 @@ async function openNewRelation(){
     <div class="editrow"><label>亲密度</label><input type="number" id="relClo" min="0" max="100" value="0"></div>
     <div class="editrow"><label>熟悉</label><input type="number" id="relFam" min="0" max="100" value="0"></div>
     <div class="editrow"><label>信任</label><input type="number" id="relTru" min="0" max="100" value="0"></div>
-    <div class="editrow"><label>备注</label><input id="relNote" placeholder="可空，例如「一起盖过房」"></div>
-    <div class="sectitle">各场景里的称呼 <span class="hint">留空 = 按渠道账号/群消息自动显示</span></div>
-    ${SCENE_META.map(([k,l])=>`<div class="editrow"><label>${l}</label>
-      <input id="relSc_${k}" placeholder="留空 = 自动"></div>`).join('')}`,
+    <div class="editrow"><label>关系备注 <span class="dim">（怎么认识的、发生过什么）</span></label>
+      <input id="relNote" placeholder="可空，例如「一起盖过房」"></div>
+    <p class="dim" style="font-size:11.5px;margin:2px 0 0">
+      各场景里的称呼（MC / QQ 私聊 / QQ 群 / 直播间）在<b>「身份」页</b>维护，
+      和渠道账号放在一起；建完关系后去那边补就行。
+    </p>`,
     `<button class="primary" id="relCreate">创建</button><span class="sp"></span>
-     <span class="dim" style="font-size:11.5px;align-self:center">建完也能随时改</span>`);
+     <span class="dim" style="font-size:11.5px;align-self:center">数值与备注建完也能改</span>`);
 
   $('relMode').querySelectorAll('button').forEach(b=>{
     b.onclick=()=>{
@@ -1578,26 +1611,17 @@ async function openNewRelation(){
         chipsBox.querySelectorAll('.chip').forEach(x=>x.classList.remove('on'));
         chip.classList.add('on');
         pid=chip.dataset.pid;
-        // 把该身份在各渠道上的名字写进 placeholder：
-        // 只是提示「自动值长什么样」，不会替人做主填成人工值。
-        [['relSc_mc','mc'],['relSc_qq','qq'],['relSc_live','live']].forEach(([id,ch])=>{
-          const el=$(id);
-          if(el) el.placeholder = chip.dataset[ch] ? `自动：${chip.dataset[ch]}` : '留空 = 自动';
-        });
       };
     });
   }
 
   $('relCreate').onclick=async()=>{
     const mode=$('relMode').querySelector('button.on').dataset.v;
-    const scenes={};
-    SCENE_META.forEach(([k])=>{ const el=$('relSc_'+k); scenes[k]= el ? el.value : ''; });
     const body={
       familiarity:+($('relFam').value||0),
       trust:+($('relTru').value||0),
       closeness:+($('relClo').value||0),
-      note:$('relNote').value,
-      scenes
+      note:$('relNote').value
     };
     if(mode==='pick'){
       if(!pid){ toast('先点选一个身份', true); return; }
@@ -1609,7 +1633,7 @@ async function openNewRelation(){
     }
     try{
       await apiDo('POST','/api/admin/relations',body);
-      toast('已新建关系'); closeDrawer(); render();
+      toast('已新建关系；场景称呼去「身份」页补'); closeDrawer(); render();
     }catch(e){ toast('新建失败：'+e.message, true); }
   };
 }
@@ -1620,23 +1644,22 @@ function openRelationEdit(r){
     : SCENE_META.map(([k,l])=>({scene:k,label:l,name:null,source:'none',hint:null}));
 
   showDrawer('关系 · '+(r.display_name||r.person_id), `
-    <div class="editrow"><label>显示名 <span class="dim">（改这里等于改身份页的显示名）</span></label>
-      <input id="relName" value="${esc(r.display_name||'')}"></div>
-    <div class="editrow"><label>备注</label>
+    <p class="dim" style="font-size:11.5px;margin:0 0 12px">
+      这里只改<b>关系</b>本身（数值、关系备注）。显示名、渠道账号和各场景里的称呼
+      属于这个人，统一在<b>「身份」页</b>维护——两处都能改会互相覆盖。
+    </p>
+    <div class="editrow"><label>关系备注 <span class="dim">（怎么认识的、发生过什么）</span></label>
       <input id="relNote" value="${esc(r.note||'')}" placeholder="可空，例如「一起盖过房」"></div>
     <div class="sectitle">关系数值 <span class="hint">0–100；20=认识 40=熟识 70=亲近 90=交心</span></div>
     <div class="editrow"><label>亲密度</label><input type="number" id="relClo" min="0" max="100" value="${r.closeness}"></div>
     <div class="editrow"><label>熟悉</label><input type="number" id="relFam" min="0" max="100" value="${r.familiarity}"></div>
     <div class="editrow"><label>信任</label><input type="number" id="relTru" min="0" max="100" value="${r.trust}"></div>
-    <div class="sectitle">各场景里的称呼 <span class="hint">留空 = 自动跟随渠道账号/群消息</span></div>
-    ${meta.map(s=>{
-      const auto = s.name
-        ? `当前${s.source==='manual'?'人工':'自动'}：${esc(s.name)}${s.hint?`（${esc(s.hint)}）`:''}`
-        : '暂无来源';
-      return `<div class="editrow"><label>${esc(s.label)} <span class="dim">${auto}</span></label>
-        <input id="relSc_${esc(s.scene)}" value="${esc(s.source==='manual'?(s.name||''):'')}" placeholder="留空 = 自动">
-      </div>`;
-    }).join('')}
+    <div class="sectitle">各场景里的称呼 <span class="hint">只读 · 在身份页改</span></div>
+    <div class="kv">
+      ${meta.map(s=>`<div class="k">${esc(s.label)}</div>
+        <div class="v">${s.name ? esc(s.name)+' <span class="badge '+(s.source==='manual'?'b-warn':'b-extracted')+'">'+(s.source==='manual'?'人工':'自动')+'</span>' : '<span class="dim">—</span>'}
+        ${s.hint?`<span class="dim mono" style="font-size:11px">${esc(s.hint)}</span>`:''}</div>`).join('')}
+    </div>
     <div class="sectitle">只读</div>
     <div class="kv">
       <div class="k">身份 ID</div><div class="v mono">${esc(r.person_id)}</div>
@@ -1645,21 +1668,22 @@ function openRelationEdit(r){
       <div class="k">最近见面</div><div class="v mono">${fmtTime(r.last_met_ms)} <span class="dim">(${fmtAgo(r.last_met_ms)})</span></div>
     </div>`,
     `<button class="primary" id="relSave">保存</button>
-     <button id="relWho">看这个人的渠道账号 ›</button>
+     <button id="relWho">去身份页改称呼与账号 ›</button>
      <span class="sp"></span>`);
 
-  $('relWho').onclick=()=>{ closeDrawer(); go('persons'); };
+  // 跳到身份页并直接打开这个人的抽屉（renderTable 会读 state.pendingPerson）。
+  $('relWho').onclick=()=>{
+    state.pendingPerson=r.person_id;
+    closeDrawer();
+    go('persons');
+  };
   $('relSave').onclick=async()=>{
-    const scenes={};
-    meta.forEach(s=>{ const el=$('relSc_'+s.scene); if(el) scenes[s.scene]=el.value; });
     try{
       await apiDo('PATCH', `/api/admin/relations/${encodeURIComponent(r.person_id)}`, {
-        display_name: $('relName').value,
         note: $('relNote').value,
         familiarity: +($('relFam').value||0),
         trust: +($('relTru').value||0),
-        closeness: +($('relClo').value||0),
-        scenes
+        closeness: +($('relClo').value||0)
       });
       toast('已保存'); closeDrawer(); render();
     }catch(e){ toast('保存失败：'+e.message, true); }

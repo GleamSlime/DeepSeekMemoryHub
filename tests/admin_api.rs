@@ -973,3 +973,65 @@ async fn 身份场景称呼拒绝未知键与未登录() {
         .unwrap();
     assert_eq!(r.status(), 401);
 }
+
+#[tokio::test]
+async fn 可以新建身份() {
+    let s = S::start().await;
+    let ck = s.login().await;
+
+    let r = S::client()
+        .post(format!("{}/api/admin/persons", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({
+            "display_name": "姆姆",
+            "status": "pending",
+            "note": "还没出现过的人",
+            "scenes": {"qq_group": "啥子猫"}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "新建身份应成功");
+    let j: serde_json::Value = r.json().await.unwrap();
+    let pid = j["person_id"].as_str().unwrap().to_string();
+    assert!(!pid.is_empty());
+
+    let j: serde_json::Value = s
+        .get_with("/api/admin/persons", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["total"], 1);
+    let p = &j["items"][0];
+    assert_eq!(p["display_name"], "姆姆");
+    assert_eq!(p["status"], "pending");
+    assert_eq!(p["note"], "还没出现过的人");
+    let sc = p["scenes"].as_array().unwrap();
+    let g = sc.iter().find(|x| x["scene"] == "qq_group").unwrap();
+    assert_eq!(g["name"], "啥子猫");
+    assert_eq!(g["source"], "manual");
+}
+
+#[tokio::test]
+async fn 新建身份时显示名不能为空也不能未登录() {
+    let s = S::start().await;
+    let ck = s.login().await;
+
+    let r = S::client()
+        .post(format!("{}/api/admin/persons", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"display_name": "   "}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+
+    let r = S::client()
+        .post(format!("{}/api/admin/persons", s.base))
+        .json(&serde_json::json!({"display_name": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+}

@@ -52,7 +52,10 @@ pub fn router(state: AdminState) -> Router {
         .route("/api/admin/facts", get(api_facts))
         .route("/api/admin/journal", get(api_journal))
         .route("/api/admin/diaries", get(api_diaries))
-        .route("/api/admin/persons", get(api_persons))
+        .route(
+            "/api/admin/persons",
+            get(api_persons).post(api_create_person),
+        )
         .route("/api/admin/moods", get(api_moods))
         .route("/api/admin/messages", get(api_messages))
         .route("/api/admin/recall-traces", get(api_recall_traces))
@@ -324,6 +327,75 @@ async fn api_persons(
         .await
         .map_err(|e| Error::Storage(format!("身份查询失败：{e}")))??;
     Ok(Json(r))
+}
+
+#[derive(Deserialize)]
+struct NewPerson {
+    display_name: String,
+    status: Option<String>,
+    note: Option<String>,
+    /// 可选：建的时候顺手填各场景称呼（等同随后在抽屉里填）。
+    scenes: Option<std::collections::HashMap<String, String>>,
+}
+
+/// 新建一个身份。
+///
+/// 为什么需要它：身份页原先只能看到「已经出现过的人」（由渠道写入时自动建），
+/// 想手动登记一个还没出现过的人无处可点。关系页的新建能顺手建人，
+/// 但那要求你同时建一条关系——只想先登记身份时不该被逼着造关系。
+async fn api_create_person(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(b): Json<NewPerson>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+
+    let name = b.display_name.trim().to_string();
+    if name.is_empty() {
+        return Err(Error::BadRequest("显示名不能为空".into()));
+    }
+    if name.chars().count() > 32 {
+        return Err(Error::BadRequest("显示名最长 32 字".into()));
+    }
+    let status = match b.status.as_deref().map(str::trim) {
+        None | Some("") => "confirmed",
+        Some(s @ ("pending" | "confirmed")) => s,
+        Some(other) => {
+            return Err(Error::BadRequest(format!(
+                "状态只能是 pending / confirmed，收到 {other}"
+            )))
+        }
+    }
+    .to_string();
+    let note = b
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let scenes = b.scenes.unwrap_or_default();
+    check_scenes(&scenes)?;
+
+    let db = st.app.db.clone();
+    let person_id = tokio::task::spawn_blocking(move || -> Result<String> {
+        db.with_write(|tx| {
+            let now = crate::db::now_ms();
+            let pid = new_person_id(tx, &name)?;
+            tx.execute(
+                "INSERT INTO person(person_id, display_name, status, created_ms, note)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![pid, name, status, now, note],
+            )?;
+            write_scenes(tx, &pid, &scenes, now)?;
+            Ok(pid)
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("新建身份失败：{e}")))??;
+
+    Ok(Json(
+        serde_json::json!({ "ok": true, "person_id": person_id }),
+    ))
 }
 
 async fn api_moods(

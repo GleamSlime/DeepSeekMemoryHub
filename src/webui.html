@@ -1006,7 +1006,10 @@ async function renderTable(c, page){
   }
 
   const bn=$('btnNew');
-  if(bn) bn.onclick=()=>openCreate(page);
+  if(bn) bn.onclick=()=>{
+    // 身份不走通用表单：要状态单选 + 各场景称呼。
+    if(page==='persons') openNewPerson(); else openCreate(page);
+  };
 
   c.querySelectorAll('[data-pg]').forEach(el=>el.onclick=()=>{
     state.params.page = +el.dataset.pg;
@@ -1017,7 +1020,7 @@ async function renderTable(c, page){
 
 /// 哪些页面支持新增。事件/事实走 /v1 的 POST，手帐/日记也补了 POST。
 function canCreate(page){
-  return ['events','facts','journal','diaries'].includes(page);
+  return ['events','facts','journal','diaries','persons'].includes(page);
 }
 
 const CREATE_FORMS = {
@@ -1068,6 +1071,62 @@ const CREATE_FORMS = {
     url:'/v1/diary',
   }),
 };
+
+/// 新建身份。与「新建关系」的区别：这里不建关系，只登记一个人。
+function openNewPerson(){
+  showDrawer('新建身份', `
+    <div class="editrow"><label>显示名</label>
+      <input id="npName" placeholder="例如 姆姆">
+    </div>
+    <div class="editrow"><label>状态</label>
+      <span class="seg" id="npStatus">
+        <button data-v="confirmed" class="on">已确认</button>
+        <button data-v="pending">待确认</button>
+      </span>
+      <span class="dim" style="font-size:11px;margin-top:4px">
+        待确认 = 还没跟其他渠道的账号对上；先登记、后绑定就选它
+      </span>
+    </div>
+    <div class="editrow"><label>身份备注 <span class="dim">（这人是谁，可空）</span></label>
+      <input id="npNote" placeholder="例如「服务器服主」">
+    </div>
+    <div class="sectitle">各场景里的称呼 <span class="hint">可空；之后也能在抽屉里补</span></div>
+    <p class="dim" style="font-size:11.5px;margin:0 0 10px">
+      同一个人在不同地方被叫的名字不一样。填了就以这里为准，留空按渠道账号/群名片自动推导。
+    </p>
+    ${SCENE_META.map(([k,l])=>`<div class="editrow"><label>${l}</label>
+      <input id="npSc_${k}" placeholder="留空 = 自动"></div>`).join('')}`,
+    `<button class="primary" id="npCreate">创建</button><span class="sp"></span>
+     <span class="dim" style="font-size:11.5px;align-self:center">建完可在身份页继续绑账号</span>`);
+
+  $('npStatus').querySelectorAll('button').forEach(b=>{
+    b.onclick=()=>{
+      $('npStatus').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+    };
+  });
+
+  $('npCreate').onclick=async()=>{
+    const name=$('npName').value.trim();
+    if(!name){ toast('显示名不能为空', true); return; }
+    const st=$('npStatus').querySelector('button.on');
+    const scenes={};
+    SCENE_META.forEach(([k])=>{ const el=$('npSc_'+k); if(el) scenes[k]=el.value; });
+    try{
+      const r=await apiDo('POST','/api/admin/persons',{
+        display_name:name,
+        status: st ? st.dataset.v : 'confirmed',
+        note: $('npNote').value,
+        scenes
+      });
+      toast('已新建身份');
+      closeDrawer();
+      // 直接打开新建的这个人的抽屉，省得再翻列表
+      if(r && r.person_id) state.pendingPerson=r.person_id;
+      render();
+    }catch(e){ toast('新建失败：'+e.message, true); }
+  };
+}
 
 function openCreate(page){
   const form = CREATE_FORMS[page]();

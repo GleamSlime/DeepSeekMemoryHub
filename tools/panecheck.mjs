@@ -216,7 +216,26 @@ ok(ppatch.url.includes('/api/admin/person/p-gleam'), '身份保存打到 person 
 ok(ppb.scenes && ppb.scenes.qq_group === '', '清空的场景传空串（后端回退自动）');
 ok(ppb.scenes && ppb.scenes.live === '直播间的Gleam', '新场景称呼进请求体');
 
-// 5. 新建关系：选身份 + 创建，请求体不带 scenes
+// 5. 新建身份：身份页应有「+ 新增」，并在创建时发 POST /api/admin/persons
+await vm.runInContext(`(async()=>{ state.page='persons'; state.params={}; await render(); })()`, ctx);
+ok(get('content').innerHTML.includes('+ 新增'), '身份页有新增按钮');
+await vm.runInContext(`openNewPerson()`, ctx);
+const np = get('drawerBody').innerHTML;
+ok(np.includes('id="npName"'), '新建身份有显示名输入');
+ok(np.includes('id="npStatus"'), '新建身份有状态单选');
+ok(np.includes('id="npSc_qq_group"'), '新建身份能填 QQ 群称呼');
+get('npName').value = '新登记的人';
+get('npNote').value = '还没出现过';
+get('npSc_qq_group').value = '群里的新登记';
+await get('npCreate').onclick();
+const npPost = calls.filter((c) => c.method === 'POST').pop();
+const npBody = npPost ? JSON.parse(npPost.body) : {};
+ok(npPost.url.endsWith('/api/admin/persons'), 'POST 打到身份接口');
+ok(npBody.display_name === '新登记的人', '请求体带显示名');
+ok(npBody.status === 'confirmed', '默认状态是已确认');
+ok(npBody.scenes && npBody.scenes.qq_group === '群里的新登记', '请求体带场景称呼');
+
+// 6. 新建关系：选身份 + 创建，请求体不带 scenes
 await vm.runInContext(`(async()=>{ await openNewRelation(); })()`, ctx);
 const nw = get('drawerBody').innerHTML;
 ok(nw.includes('relChips'), '新建时有身份选择');

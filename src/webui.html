@@ -1755,7 +1755,7 @@ async function renderReplay(c){
     c.innerHTML = `<div class="empty">
       还没有注入回放。<br>
       <span class="dim">它由 MC 插件每轮上报。<b>需要插件运行过一次真实回合</b>才会出现；
-      也可以用 <code>/ainpc memory &lt;npc&gt; preview</code> 触发一次（preview 不写回放）。</span>
+      也可以用 <code>/ainpc memory &lt;名字&gt; preview</code> 触发一次（preview 不写回放）。</span>
     </div>`;
     return;
   }
@@ -1858,7 +1858,7 @@ async function renderKb(c){
     ${healthCard}
     <div class="tbl-head" style="border:1px solid var(--line);border-radius:10px 10px 0 0">
       <span class="t">知识库</span>
-      <span class="dim">${kbs.length} 本 · 外部资料，与 NPC 记忆分开存</span>
+      <span class="dim">${kbs.length} 本 · 外部资料，与记忆分开存</span>
       <span class="sp"></span>
       <button id="btnNewKb">新建知识库</button>
       <button class="primary" id="btnImport">导入文档</button>

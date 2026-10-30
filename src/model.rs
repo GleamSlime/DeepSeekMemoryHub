@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
-    /// Minecraft 服务器里的 NPC 经历。
+    /// Minecraft 服务器里的角色经历。
     Mc,
     /// QQ 群聊。
     Qq,
@@ -125,7 +125,7 @@ pub struct Event {
     pub dedup_key: Option<String>,
 }
 
-/// 一条事实：NPC 相信的东西。
+/// 一条事实：它相信的东西。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
     pub id: String,
@@ -218,7 +218,7 @@ impl FactTier {
 pub enum Scope {
     /// 只属于某个玩家。
     Player,
-    /// 属于这个 NPC 自己（性格、偏好）。
+    /// 属于它自己（性格、偏好）。
     Companion,
     /// 所有人都能看到。
     Shared,

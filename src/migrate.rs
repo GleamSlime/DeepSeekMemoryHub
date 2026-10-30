@@ -3,7 +3,7 @@
 //! # 为什么要有这个
 //!
 //! Hub 建起来时是空库。MC 侧已经有 97 条事件、400 条手帐、4 篇日记、
-//! 2 条自我认知——**这些是真实生活过的记录**，不迁过来等于让 NPC 失忆。
+//! 2 条自我认知——**这些是真实生活过的记录**，不迁过来等于让它失忆。
 //!
 //! # 三条设计原则
 //!
@@ -635,7 +635,7 @@ pub fn from_legacy(src_path: &Path, dst: &Db, dry_run: bool) -> Result<Migrated>
 ///
 /// # 为什么规划要单独一个函数
 ///
-/// 规划**不在 SQLite 里**，它是 `plans/<npc>/<day>.json` 一堆独立文件。
+/// 规划**不在 SQLite 里**，它是 `plans/<角色名>/<day>.json` 一堆独立文件。
 /// 之前只写了 DB 迁移，于是规划一条都没过来——这是漏掉的整块，
 /// 不是「迁移不完整」的小问题：计划是手帐的上游、是它一天做什么的依据。
 ///
@@ -643,7 +643,7 @@ pub fn from_legacy(src_path: &Path, dst: &Db, dry_run: bool) -> Result<Migrated>
 ///
 /// ```text
 /// plans/
-///   <npc名>/
+///   <角色名>/
 ///     g0.json g1.json ...   ← 每天一份
 ///     latest.json           ← 指针文件，**不是规划**，必须跳过
 /// ```
@@ -661,21 +661,21 @@ pub fn from_legacy_plans(plans_dir: &Path, dst: &Db, dry_run: bool) -> Result<Mi
 
     let mut m = Migrated::default();
 
-    let npc_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(plans_dir)
+    let plan_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(plans_dir)
         .map_err(|e| Error::Storage(format!("读不了规划目录：{e}")))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect();
 
-    for npc_dir in npc_dirs {
-        let npc_name = npc_dir
+    for plan_dir in plan_dirs {
+        let subject_name = plan_dir
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&npc_dir)
-            .map_err(|e| Error::Storage(format!("读不了 {npc_name} 目录：{e}")))?
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&plan_dir)
+            .map_err(|e| Error::Storage(format!("读不了 {subject_name} 目录：{e}")))?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
@@ -710,17 +710,17 @@ pub fn from_legacy_plans(plans_dir: &Path, dst: &Db, dry_run: bool) -> Result<Mi
                 eprintln!("  跳过 {}：没有 planningDayId", f.display());
                 continue;
             }
-            // 目录名优先于文件里的 companionId：目录就是 NPC 的权威来源。
-            let companion = if npc_name.is_empty() {
+            // 目录名优先于文件里的 companionId：目录名就是角色的权威来源。
+            let subject = if subject_name.is_empty() {
                 v.get("companionId")
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string()
             } else {
-                npc_name.clone()
+                subject_name.clone()
             };
-            if companion.is_empty() {
-                eprintln!("  跳过 {}：认不出是哪个 NPC", f.display());
+            if subject.is_empty() {
+                eprintln!("  跳过 {}：认不出是哪个角色", f.display());
                 continue;
             }
 
@@ -740,7 +740,7 @@ pub fn from_legacy_plans(plans_dir: &Path, dst: &Db, dry_run: bool) -> Result<Mi
                 .get("id")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("plan-{companion}-{day}"));
+                .unwrap_or_else(|| format!("plan-{subject}-{day}"));
             let summary = v.get("summary").and_then(|x| x.as_str()).map(String::from);
             let model = v.get("model").and_then(|x| x.as_str()).map(String::from);
             let game_day = v.get("gameDay").and_then(|x| x.as_i64());
@@ -754,7 +754,7 @@ pub fn from_legacy_plans(plans_dir: &Path, dst: &Db, dry_run: bool) -> Result<Mi
                 .unwrap_or(created);
 
             let inserted = dst.with_write(|tx| {
-                // 幂等：同一 (companion, day) 已存在就整份替换（重新生成过）。
+                // 幂等：同一 (角色, day) 已存在就整份替换（重新生成过）。
                 let existing: Option<String> = tx
                     .query_row(
                         "SELECT id FROM plan WHERE planning_day_id = ?1
@@ -1146,7 +1146,7 @@ mod plan_tests {
 
     const NOW: i64 = 1_793_000_000_000;
 
-    /// 造一个 `plans/<npc>/` 目录，含 2 份规划 + 1 个 latest.json 指针。
+    /// 造一个 `plans/<角色名>/` 目录，含 2 份规划 + 1 个 latest.json 指针。
     fn legacy_plans(root: &Path) {
         let dir = root.join("大肥鱼");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1317,11 +1317,11 @@ mod plan_tests {
     fn 坏_json_被跳过不中断() {
         let dir = tempfile::tempdir().unwrap();
         let plans = dir.path().join("plans");
-        let npc = plans.join("大肥鱼");
-        std::fs::create_dir_all(&npc).unwrap();
-        std::fs::write(npc.join("g1.json"), "{ 这不是 json").unwrap();
+        let subject = plans.join("大肥鱼");
+        std::fs::create_dir_all(&subject).unwrap();
+        std::fs::write(subject.join("g1.json"), "{ 这不是 json").unwrap();
         std::fs::write(
-            npc.join("g2.json"),
+            subject.join("g2.json"),
             format!(r#"{{"id":"p2","planningDayId":"g2","createdMs":{NOW},"updatedMs":{NOW},"items":[]}}"#),
         )
         .unwrap();

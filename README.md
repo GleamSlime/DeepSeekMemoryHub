@@ -3,7 +3,7 @@
 > 跨渠道 AI 记忆服务：让 MC 插件里的角色、QQ 群机器人、直播弹幕机器人
 > 共用同一份记忆，彼此记得对方渠道发生过的事。
 >
-> **状态：可运行（v0.1.0）。325 项测试全绿。已产出 macOS DMG。**
+> **状态：可运行（v0.1.0）。341 项测试全绿。已产出 macOS DMG。**
 
 ---
 
@@ -41,9 +41,9 @@ BLUEWHALE_BIND=lan ./target/release/bluewhale-memory serve
 | 写入吞吐 | **5,700 – 7,400 req/s** | 16/32 并发，p50 1.9–3.8 ms |
 | 读取吞吐 | **7,700 – 8,300 req/s** | 16/32 并发，p50 1.7–3.5 ms |
 | 读取 p99 | **4.3 – 8.9 ms** | 加连接池后从 246 ms 降下来 |
-| 二进制大小 | **7.8 MB** | 单文件；含知识库的 HTTP 客户端（净增 2.2 MB） |
+| 二进制大小 | **8.1 MB** | 单文件；含知识库的 HTTP 客户端（净增 2.2 MB） |
 | DMG 大小 | **2.3 MB** | 含 .app + 安装脚本 |
-| 测试数量 | **325**（213 单测 + 3 CLI + 112 集成） | 全绿 |
+| 测试数量 | **341**（213 单测 + 3 CLI + 125 集成） | 全绿 |
 
 > 硬件：Apple Silicon，10 核，16 GB。压测脚本见对话记录，非固定目录。
 
@@ -108,9 +108,14 @@ cookie 不能调 API，token 也不该塞进浏览器。**一个泄了不会带�
 
 ### 记忆与权重
 
-- 15 张表：`person` / `person_account` / `event` / `fact` / `journal` / `diary` /
-  `self_narrative` / `mood` / `trait` / `relation` / `promise` /
-  `channel_message` / `recall_log` / `snapshot` / `rollback_log`
+- 24 张表（`schema 11`）：
+  - 身份：`person` / `person_account` / `person_scene`
+  - 记忆：`event` / `fact` / `journal` / `diary`
+  - 人格：`self_narrative` / `mood` / `trait` / `relation` / `promise`
+  - 渠道：`channel_message`
+  - 规划：`plan` / `plan_item`
+  - 知识库：`kb` / `kb_doc` / `kb_chunk`
+  - 检索与运维：`recall_log` / `injection_replay` / `snapshot` / `rollback_log` / `panel_session`
 - **可配置权重模型**（`WeightConfig`，全部可调）：
   `weight = importance^exp × 衰减(半衰期) × 强化(回忆次数,有上限) × 渠道可信度`
   - 半衰期默认 30 天，衰减有下限（老记忆不归零，仍可显式检索到）
@@ -363,9 +368,19 @@ Hub 建起来是空库，MC 侧已有的记忆要迁过来：
 
 ## 待办
 
-- [ ] 从 MC 侧 `shared/deepseek_mc/memory.db` 迁移存量数据（脚本未写）
-- [ ] 自我认知的**生成**（目前只有表与读取，还没有「每晚改写」的定时任务）
-- [ ] AstrBot 插件把 `/qq/ingest` 指向本服务
-- [ ] 直播弹幕渠道适配器（平台待定）
-- [ ] Web 面板（目前只有 JSON API）
-- [ ] Linux / Windows 打包
+> 2026-10-30 逐条核对过仓库现状：能做的都已经做了，剩下这三条**都卡在外部决定**上。
+
+- [ ] **自我认知的生成方**：Hub 只存不生成（设计上不调模型）。
+      谁在什么时候改写这一版（MC 插件？每晚定时任务？换渠道时？）还没定。
+- [ ] **直播弹幕渠道**：平台未定（B 站 / 抖音 / 其它），适配器因此没写。
+      接口侧不需要改——`channel=live` 与 `scene` 参数都已经在。
+- [ ] **Linux / Windows 打包**：只有 macOS DMG（`packaging/make-dmg.sh`）。
+      另外两个平台的核心是一个单二进制，缺的是安装脚本与开机自启。
+
+### 已完成（原待办，留档）
+
+- [x] 从 MC 侧 `shared/deepseek_mc/memory.db` 迁移存量数据 —— `src/migrate.rs`，
+      514 行 + 30 份计划 JSON，可重复执行、源库只读
+- [x] Web 面板 —— 19 个页面，会话登录 + 事件/事实/手帐/日记/关系的增删改 + 知识库
+- [x] AstrBot 插件接本服务 —— `memory_url` 指向 25590，读走 `/v1/context`、
+      写走 `/v1/message` + `/v1/event`

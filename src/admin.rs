@@ -1,0 +1,1528 @@
+//! 管理后台的 HTTP 层：登录、会话、以及给各详情页用的分页接口。
+//!
+//! # 鉴权与 API 的分工
+//!
+//! - `/api/admin/*` 用 **cookie 会话**（人在浏览器里）
+//! - `/v1/*` 用 **`X-API-Token`**（脚本/其他服务）
+//!
+//! 两者互不替代。面板的 cookie 不能调 `/v1/*`，脚本的 token 也不该被塞进浏览器。
+
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::routing::{get, post};
+use axum::{Form, Json, Router};
+use serde::{Deserialize, Serialize};
+
+use crate::auth::{self, Auth};
+use crate::config::Config;
+use crate::error::{Error, Result};
+use crate::http::AppState;
+use crate::query::{self, Page};
+
+/// 管理后台的状态：在 `AppState` 之外多一个 `Auth`。
+#[derive(Clone)]
+pub struct AdminState {
+    pub app: AppState,
+    pub auth: std::sync::Arc<Auth>,
+}
+
+impl AdminState {
+    pub fn new(app: AppState, cfg: &Config) -> Self {
+        // 先取 db，再 move app：Auth 需要 Arc<Db> 来落盘会话。
+        let db = app.db.clone();
+        let auth = std::sync::Arc::new(Auth::with_db(
+            &cfg.panel_user,
+            &cfg.panel_password,
+            Some(db),
+        ));
+        Self { app, auth }
+    }
+}
+
+/// 管理后台路由。
+pub fn router(state: AdminState) -> Router {
+    Router::new()
+        .route("/", get(index))
+        .route("/login", get(login_page).post(do_login))
+        .route("/logout", post(do_logout).get(do_logout))
+        .route("/api/admin/session", get(session_info))
+        .route("/api/admin/overview", get(api_overview))
+        .route("/api/admin/events", get(api_events))
+        .route("/api/admin/facts", get(api_facts))
+        .route("/api/admin/journal", get(api_journal))
+        .route("/api/admin/diaries", get(api_diaries))
+        .route("/api/admin/persons", get(api_persons))
+        .route("/api/admin/moods", get(api_moods))
+        .route("/api/admin/messages", get(api_messages))
+        .route("/api/admin/recall-traces", get(api_recall_traces))
+        .route("/api/admin/injections", get(api_injections))
+        .route(
+            "/api/admin/settings",
+            get(api_settings).post(api_save_settings),
+        )
+        .route("/api/admin/plans", get(api_plans))
+        .route("/api/admin/plan/{id}", get(api_plan_detail))
+        .route("/api/admin/timeline", get(api_timeline))
+        .route("/api/admin/self", get(api_self))
+        .route(
+            "/api/admin/relations",
+            get(api_relations).post(api_create_relation),
+        )
+        .route(
+            "/api/admin/relations/{person_id}",
+            axum::routing::patch(api_patch_relation),
+        )
+        .route("/api/admin/traits", get(api_traits))
+        .route("/api/admin/promises", get(api_promises))
+        .route("/api/admin/snapshots", get(api_snapshots))
+        .route("/api/admin/rollbacks", get(api_rollbacks))
+        // 后台自己的写操作：用会话鉴权，不需要 API token。
+        // 之前面板让人去填 token 才能拍快照，那是把两条鉴权链混为一谈了。
+        .route("/api/admin/snapshot", post(api_take_snapshot))
+        .route(
+            "/api/admin/person/{id}",
+            axum::routing::patch(api_patch_person),
+        )
+        .route("/api/admin/person/{id}/account", post(api_bind_account))
+        // ---------------------------------------------------------- 知识库
+        //
+        // 走会话鉴权，与 `/v1/kb/*`（token 鉴权）是两条链，互不替代：
+        // 人在浏览器里用前者，脚本和其他服务用后者。
+        .route("/api/admin/kb", get(api_kb_list).post(api_kb_create))
+        .route("/api/admin/kb/health", get(api_kb_health))
+        .route("/api/admin/kb/doc", post(api_kb_import))
+        .route(
+            "/api/admin/kb/doc/{id}",
+            get(api_kb_get_doc)
+                .patch(api_kb_patch_doc)
+                .delete(api_kb_delete_doc),
+        )
+        .route("/api/admin/kb/chunk/{id}", get(api_kb_chunk_detail))
+        .route("/api/admin/kb/search", get(api_kb_search))
+        .route("/api/admin/kb/reembed", post(api_kb_reembed))
+        .with_state(state)
+}
+
+// ------------------------------------------------------------------ 会话
+
+/// 取出并校验会话。失败即 401（前端会跳转登录页）。
+fn require_session(st: &AdminState, headers: &HeaderMap) -> Result<String> {
+    if !st.auth.login_required() {
+        // 未配置登录：只在「监听回环」时才允许裸奔。
+        // 监听内网却没口令的后台等于把所有记忆摊开给整个内网。
+        if !st.app.cfg.effective_bind().ip().is_loopback() {
+            return Err(Error::Unauthorized);
+        }
+        return Ok("(未启用登录)".to_string());
+    }
+    let sid = auth::session_from_cookie(
+        headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok()),
+    );
+    st.auth.verify(&sid).ok_or(Error::Unauthorized)
+}
+
+#[derive(Serialize)]
+struct SessionInfo {
+    /// 是否启用了登录。
+    login_required: bool,
+    /// 当前登录用户，未登录为 null。
+    user: Option<String>,
+    active_sessions: usize,
+}
+
+async fn session_info(State(st): State<AdminState>, headers: HeaderMap) -> Json<SessionInfo> {
+    let sid = auth::session_from_cookie(
+        headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok()),
+    );
+    Json(SessionInfo {
+        login_required: st.auth.login_required(),
+        user: st.auth.verify(&sid),
+        active_sessions: st.auth.active_sessions(),
+    })
+}
+
+// ------------------------------------------------------------------ 登录页
+
+async fn index(State(st): State<AdminState>, headers: HeaderMap) -> Response {
+    require_session(&st, &headers)
+        .map(|_| Html(crate::webui::INDEX_HTML).into_response())
+        .unwrap_or_else(|_| Redirect::to("/login").into_response())
+}
+
+async fn login_page(State(st): State<AdminState>, headers: HeaderMap) -> Response {
+    // 已经登录就直接进后台，省一次点击。
+    if require_session(&st, &headers).is_ok() {
+        return Redirect::to("/").into_response();
+    }
+    Html(crate::webui::LOGIN_HTML).into_response()
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    user: String,
+    pass: String,
+}
+
+async fn do_login(State(st): State<AdminState>, Form(f): Form<LoginForm>) -> Response {
+    if st.auth.check(&f.user, &f.pass) {
+        let sid = st.auth.issue(if f.user.is_empty() {
+            "operator"
+        } else {
+            &f.user
+        });
+        let mut resp = Redirect::to("/").into_response();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&auth::cookie_header(&sid)) {
+            resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+        }
+        resp
+    } else {
+        // 固定延时：让脚本化猜测变得没意义，又不需要锁定表。
+        tokio::time::sleep(std::time::Duration::from_millis(auth::FAIL_DELAY_MS)).await;
+        let mut resp = Redirect::to("/login?e=1").into_response();
+        *resp.status_mut() = StatusCode::SEE_OTHER;
+        resp
+    }
+}
+
+async fn do_logout(State(st): State<AdminState>, headers: HeaderMap) -> Response {
+    let sid = auth::session_from_cookie(
+        headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok()),
+    );
+    st.auth.logout(&sid);
+    let mut resp = Redirect::to("/login").into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&auth::clear_cookie_header()) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+    }
+    resp
+}
+
+// ------------------------------------------------------------------ 分页查询
+
+/// 分页 + 过滤的查询参数。所有字段可选。
+#[derive(Deserialize, Default)]
+struct ListParams {
+    page: Option<u32>,
+    size: Option<u32>,
+    q: Option<String>,
+    channel: Option<String>,
+    kind: Option<String>,
+    status: Option<String>,
+    tier: Option<String>,
+    /// `1` = 只看被回滚遗忘的。
+    forgotten: Option<u8>,
+}
+
+impl ListParams {
+    fn page(&self) -> Page {
+        Page::new(self.page, self.size)
+    }
+}
+
+type ApiResult<T> = std::result::Result<Json<T>, Error>;
+
+async fn api_overview(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<query::Overview> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let o = tokio::task::spawn_blocking(move || query::overview(&db))
+        .await
+        .map_err(|e| Error::Storage(format!("概览查询失败：{e}")))??;
+    Ok(Json(o))
+}
+
+async fn api_events(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<ListParams>,
+) -> ApiResult<query::Paged<query::EventItem>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let f = query::EventFilter {
+        channel: p.channel.clone(),
+        kind: p.kind.clone(),
+        q: p.q.clone(),
+        from_ms: None,
+        to_ms: None,
+        forgotten: p.forgotten == Some(1),
+    };
+    let page = p.page();
+    let r = tokio::task::spawn_blocking(move || query::events(&db, &f, page))
+        .await
+        .map_err(|e| Error::Storage(format!("事件查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+async fn api_facts(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<ListParams>,
+) -> ApiResult<query::Paged<query::FactItem>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let f = query::FactFilter {
+        q: p.q.clone(),
+        status: p.status.clone(),
+        tier: p.tier.clone(),
+        show_superseded: p.forgotten == Some(1),
+    };
+    let page = p.page();
+    let r = tokio::task::spawn_blocking(move || query::facts(&db, &f, page))
+        .await
+        .map_err(|e| Error::Storage(format!("事实查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+async fn api_journal(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<ListParams>,
+) -> ApiResult<query::Paged<query::JournalItem>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let q = p.q.clone();
+    let page = p.page();
+    let r = tokio::task::spawn_blocking(move || query::journal(&db, q.as_deref(), page))
+        .await
+        .map_err(|e| Error::Storage(format!("手帐查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+async fn api_diaries(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<ListParams>,
+) -> ApiResult<query::Paged<query::DiaryItem>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let k = p.kind.clone();
+    let page = p.page();
+    let r = tokio::task::spawn_blocking(move || query::diaries(&db, k.as_deref(), page))
+        .await
+        .map_err(|e| Error::Storage(format!("日记查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+async fn api_persons(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<ListParams>,
+) -> ApiResult<query::Paged<query::PersonItem>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let q = p.q.clone();
+    let page = p.page();
+    let r = tokio::task::spawn_blocking(move || query::persons(&db, q.as_deref(), page))
+        .await
+        .map_err(|e| Error::Storage(format!("身份查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+async fn api_moods(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::moods(&db))
+        .await
+        .map_err(|e| Error::Storage(format!("情绪查询失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+async fn api_plans(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<ListParams>,
+) -> ApiResult<query::Paged<query::PlanRow>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let q = p.q.clone();
+    let page = p.page();
+    let r = tokio::task::spawn_blocking(move || query::plans(&db, q.as_deref(), page))
+        .await
+        .map_err(|e| Error::Storage(format!("规划查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+/// 单份规划的全部内容。列表页不拉条目，点开才拉——
+/// 30 份规划 × 122 个条目，一次全拉是没必要的。
+async fn api_plan_detail(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<query::PlanDetail> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let d = tokio::task::spawn_blocking(move || query::plan_detail(&db, &id))
+        .await
+        .map_err(|e| Error::Storage(format!("规划详情失败：{e}")))??;
+    Ok(Json(d))
+}
+
+async fn api_messages(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<ListParams>,
+) -> ApiResult<query::Paged<query::MessageRow>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let (ch, q) = (p.channel.clone(), p.q.clone());
+    let page = p.page();
+    let r = tokio::task::spawn_blocking(move || {
+        query::messages(&db, ch.as_deref(), q.as_deref(), page)
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("消息查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+async fn api_recall_traces(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::recall_traces(&db, 30))
+        .await
+        .map_err(|e| Error::Storage(format!("回放查询失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+async fn api_injections(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(_q): Query<CompanionQ>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::injection_replays(&db, 60))
+        .await
+        .map_err(|e| Error::Storage(format!("回放查询失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+/// 当前的运行配置（只读部分 + 可改的权重）。
+///
+/// **注意这里不放 token / 口令**：面板能读配置不等于能读凭据。
+/// 那两条一旦出现在这里，任何一次截图或日志转发都会泄露。
+async fn api_settings(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let cfg = &st.app.cfg;
+    Ok(Json(serde_json::json!({
+        "bind": cfg.effective_bind().to_string(),
+        "loopback_only": cfg.effective_bind().ip().is_loopback(),
+        "data_dir": cfg.data_dir.to_string_lossy(),
+        "db_path": cfg.db_path().to_string_lossy(),
+        "snapshot_dir": cfg.snapshot_dir().to_string_lossy(),
+        "snapshot_keep_days": cfg.snapshot_keep_days,
+        "snapshot_check_seconds": cfg.snapshot_check_seconds,
+        "max_concurrency": cfg.max_concurrency,
+        "max_body_bytes": cfg.max_body_bytes,
+        "request_timeout_seconds": cfg.request_timeout_seconds,
+        "token_configured": !cfg.token.is_empty(),
+        "panel_login": !cfg.panel_user.is_empty(),
+        "panel_user": cfg.panel_user,
+        "weight": st.app
+            .weight
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|e| e.into_inner().clone()),
+    })))
+}
+
+/// 保存权重配置。
+///
+/// 只允许改权重模型这一块：它决定检索排序，改错了能立刻看到效果，
+/// 也随时能改回来。端口、数据目录这类**重新绑定或迁移**的配置不在面板里改——
+/// 那些需要重启，而「面板上点一下就换数据目录」是个危险的能力。
+#[derive(Deserialize)]
+struct WeightPatch {
+    importance_exp: Option<f64>,
+    half_life_days: Option<f64>,
+    decay_floor: Option<f64>,
+    reinforce_gain: Option<f64>,
+    reinforce_cap: Option<f64>,
+    channel_trust_mc: Option<f64>,
+    channel_trust_qq: Option<f64>,
+    channel_trust_live: Option<f64>,
+    channel_trust_system: Option<f64>,
+}
+
+async fn api_save_settings(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(p): Json<WeightPatch>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+
+    // 基于当前值打补丁，然后**整体校验**：权重的各个参数互相约束
+    // （比如 reinforce_cap < 1 会让强化变成削弱），逐字段校验抓不到这种组合错误。
+    let mut w = st
+        .app
+        .weight
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+
+    if let Some(v) = p.importance_exp {
+        w.importance_exp = v;
+    }
+    if let Some(v) = p.half_life_days {
+        w.half_life_days = v;
+    }
+    if let Some(v) = p.decay_floor {
+        w.decay_floor = v;
+    }
+    if let Some(v) = p.reinforce_gain {
+        w.reinforce_gain = v;
+    }
+    if let Some(v) = p.reinforce_cap {
+        w.reinforce_cap = v;
+    }
+    if let Some(v) = p.channel_trust_mc {
+        w.channel_trust_mc = v;
+    }
+    if let Some(v) = p.channel_trust_qq {
+        w.channel_trust_qq = v;
+    }
+    if let Some(v) = p.channel_trust_live {
+        w.channel_trust_live = v;
+    }
+    if let Some(v) = p.channel_trust_system {
+        w.channel_trust_system = v;
+    }
+
+    w.validate().map_err(Error::BadRequest)?;
+
+    // 先落盘再改内存：反过来的话，落盘失败会让「内存生效了但重启就丢」
+    // 变成一件没人知道的事。
+    crate::http::save_weights(&st.app.cfg, &w);
+    if let Ok(mut g) = st.app.weight.write() {
+        *g = w.clone();
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true, "weight": w })))
+}
+
+#[derive(Deserialize)]
+struct TimelineQ {
+    days: Option<usize>,
+}
+
+async fn api_timeline(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(q): Query<TimelineQ>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let days = q.days.unwrap_or(12);
+    let items = tokio::task::spawn_blocking(move || query::timeline(&db, days))
+        .await
+        .map_err(|e| Error::Storage(format!("时间线查询失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+struct CompanionQ {}
+
+async fn api_self(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(_q): Query<CompanionQ>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::self_narratives(&db))
+        .await
+        .map_err(|e| Error::Storage(format!("自述查询失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+async fn api_relations(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(_q): Query<CompanionQ>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::relations(&db))
+        .await
+        .map_err(|e| Error::Storage(format!("关系查询失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+/// 校验场景键。场景集合只在 `query::PERSON_SCENES` 定义一处，
+/// 这里也用它 —— 两处各写一套迟早会对不上（面板能选、后端不认）。
+fn check_scenes(scenes: &std::collections::HashMap<String, String>) -> Result<()> {
+    for key in scenes.keys() {
+        if !query::is_person_scene(key) {
+            return Err(Error::BadRequest(format!(
+                "未知场景：{key}（只能是 mc / qq / qq_group / live）"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 把场景称呼写进库。空串 = 删掉这一行（回到自动推导），不写空名字。
+fn write_scenes(
+    tx: &rusqlite::Connection,
+    person_id: &str,
+    scenes: &std::collections::HashMap<String, String>,
+    now: i64,
+) -> Result<()> {
+    check_scenes(scenes)?;
+    for (scene, name) in scenes {
+        let name = name.trim();
+        if name.is_empty() {
+            tx.execute(
+                "DELETE FROM person_scene WHERE person_id = ?1 AND scene = ?2",
+                rusqlite::params![person_id, scene],
+            )?;
+            continue;
+        }
+        if name.chars().count() > 64 {
+            return Err(Error::BadRequest(format!("场景 {scene} 的称呼最长 64 字")));
+        }
+        tx.execute(
+            "INSERT INTO person_scene(person_id, scene, name, updated_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(person_id, scene) DO UPDATE SET
+               name = excluded.name, updated_ms = excluded.updated_ms",
+            rusqlite::params![person_id, scene, name, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// 亲密度/熟悉/信任一律夹到 0–100：填 120 是手滑，不是想要 120 倍关系。
+fn score(v: i64) -> i64 {
+    v.clamp(0, 100)
+}
+
+/// 给人建一个可读的 id。中文名没法转 slug，就用时间戳兜底。
+fn new_person_id(tx: &rusqlite::Connection, display_name: &str) -> Result<String> {
+    let slug: String = display_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    let base = if slug.is_empty() {
+        format!("p-{:x}", crate::db::now_ms())
+    } else {
+        format!("p-{slug}")
+    };
+    for n in 0..1000 {
+        let id = if n == 0 {
+            base.clone()
+        } else {
+            format!("{base}-{n}")
+        };
+        let used: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM person WHERE person_id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )?;
+        if used == 0 {
+            return Ok(id);
+        }
+    }
+    Err(Error::BadRequest("生成身份 id 失败（重名太多）".into()))
+}
+
+#[derive(Deserialize)]
+struct NewRelation {
+    /// 关联一个已有身份。给了它就不用 `display_name`。
+    person_id: Option<String>,
+    /// 没有 `person_id` 时用它新建一个身份。
+    display_name: Option<String>,
+    familiarity: Option<i64>,
+    trust: Option<i64>,
+    closeness: Option<i64>,
+    note: Option<String>,
+    /// 场景键 → 称呼。空串表示「按渠道数据自动推导」。
+    scenes: Option<std::collections::HashMap<String, String>>,
+}
+
+/// 新建关系。
+///
+/// 两种入口：挂在已有身份上（面板上点选一个人），或者顺手建一个新身份。
+/// 关系记录本身没有「新建」之外的形态——同一对人只有一条。
+async fn api_create_relation(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(b): Json<NewRelation>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+
+    let scenes = b.scenes.unwrap_or_default();
+    check_scenes(&scenes)?;
+    let existing = b
+        .person_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let display_name = b
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if existing.is_none() && display_name.is_none() {
+        return Err(Error::BadRequest(
+            "新建关系要指定已有身份，或者填一个显示名".into(),
+        ));
+    }
+    if let Some(n) = &display_name {
+        if n.chars().count() > 32 {
+            return Err(Error::BadRequest("显示名最长 32 字".into()));
+        }
+    }
+    let (fam, tru, clo) = (
+        score(b.familiarity.unwrap_or(0)),
+        score(b.trust.unwrap_or(0)),
+        score(b.closeness.unwrap_or(0)),
+    );
+    let note = b
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let db = st.app.db.clone();
+    let person_id = tokio::task::spawn_blocking(move || -> Result<String> {
+        db.with_write(|tx| {
+            let now = crate::db::now_ms();
+            let pid = match existing {
+                Some(id) => {
+                    let n: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM person WHERE person_id = ?1",
+                        rusqlite::params![id],
+                        |r| r.get(0),
+                    )?;
+                    if n == 0 {
+                        return Err(Error::NotFound(format!("身份 {id}")));
+                    }
+                    let has: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM relation WHERE person_id = ?1",
+                        rusqlite::params![id],
+                        |r| r.get(0),
+                    )?;
+                    if has > 0 {
+                        return Err(Error::BadRequest(format!(
+                            "{id} 已经有关系记录，直接编辑它"
+                        )));
+                    }
+                    id
+                }
+                None => {
+                    let name =
+                        display_name.expect("上面已校验：没有 person_id 就必须有 display_name");
+                    let pid = new_person_id(tx, &name)?;
+                    // 人主动建的关系算确认过的身份；pending 的含义是
+                    // 「这个账号还没跟别的渠道对上」，与这里不是一回事。
+                    tx.execute(
+                        "INSERT INTO person(person_id, display_name, status, created_ms)
+                         VALUES (?1, ?2, 'confirmed', ?3)",
+                        rusqlite::params![pid, name, now],
+                    )?;
+                    pid
+                }
+            };
+            tx.execute(
+                "INSERT INTO relation(person_id, owner_id, familiarity, trust, closeness,
+                                      note, first_met_ms, last_met_ms)
+                 VALUES (?1, 'me', ?2, ?3, ?4, ?5, ?6, ?6)",
+                rusqlite::params![pid, fam, tru, clo, note, now],
+            )?;
+            write_scenes(tx, &pid, &scenes, now)?;
+            Ok(pid)
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("新建关系失败：{e}")))??;
+
+    Ok(Json(
+        serde_json::json!({ "ok": true, "person_id": person_id }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct RelationPatch {
+    /// 改的是这个人的显示名（与「身份」页同一份数据）。
+    display_name: Option<String>,
+    familiarity: Option<i64>,
+    trust: Option<i64>,
+    closeness: Option<i64>,
+    /// `Some("")` = 清空；没有这个字段 = 不动。
+    note: Option<String>,
+    scenes: Option<std::collections::HashMap<String, String>>,
+}
+
+/// 改关系。只改传上来的字段，没传的保持原样。
+async fn api_patch_relation(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(b): Json<RelationPatch>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    if let Some(scenes) = &b.scenes {
+        check_scenes(scenes)?;
+    }
+    if let Some(n) = b.display_name.as_deref() {
+        if n.trim().is_empty() {
+            return Err(Error::BadRequest("显示名不能为空".into()));
+        }
+        if n.trim().chars().count() > 32 {
+            return Err(Error::BadRequest("显示名最长 32 字".into()));
+        }
+    }
+
+    let db = st.app.db.clone();
+    let id2 = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM relation WHERE person_id = ?1",
+                rusqlite::params![id2],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("关系 {id2}")));
+            }
+            let now = crate::db::now_ms();
+            if let Some(name) = b.display_name.as_deref() {
+                tx.execute(
+                    "UPDATE person SET display_name = ?1 WHERE person_id = ?2",
+                    rusqlite::params![name.trim(), id2],
+                )?;
+            }
+            // note 是三态：没传 = 不动；传空串 = 清空；传值 = 覆盖。
+            let note_set = b.note.is_some();
+            let note_val = b.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            tx.execute(
+                "UPDATE relation SET
+                   familiarity = COALESCE(?1, familiarity),
+                   trust       = COALESCE(?2, trust),
+                   closeness   = COALESCE(?3, closeness),
+                   note        = CASE WHEN ?4 THEN ?5 ELSE note END
+                 WHERE person_id = ?6",
+                rusqlite::params![
+                    b.familiarity.map(score),
+                    b.trust.map(score),
+                    b.closeness.map(score),
+                    note_set,
+                    note_val,
+                    id2
+                ],
+            )?;
+            if let Some(scenes) = &b.scenes {
+                write_scenes(tx, &id2, scenes, now)?;
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("编辑关系失败：{e}")))??;
+
+    Ok(Json(serde_json::json!({ "ok": true, "person_id": id })))
+}
+
+async fn api_traits(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(_q): Query<CompanionQ>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::traits(&db))
+        .await
+        .map_err(|e| Error::Storage(format!("特质查询失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+async fn api_promises(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(_q): Query<CompanionQ>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::promises(&db, None))
+        .await
+        .map_err(|e| Error::Storage(format!("承诺查询失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+struct SnapshotBody {
+    note: Option<String>,
+}
+
+/// 后台拍快照。**用会话鉴权**，不要求 API token。
+async fn api_take_snapshot(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    body: Option<Json<SnapshotBody>>,
+) -> ApiResult<crate::snapshot::SnapshotInfo> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let store = st.app.snapshots.clone();
+    let note = body.and_then(|b| b.note.clone());
+    let info = tokio::task::spawn_blocking(move || store.take(&db, note.as_deref()))
+        .await
+        .map_err(|e| Error::Storage(format!("快照任务失败：{e}")))??;
+    Ok(Json(info))
+}
+
+#[derive(Deserialize)]
+struct PersonPatch {
+    display_name: Option<String>,
+    status: Option<String>,
+    note: Option<String>,
+}
+
+/// 改身份。可以改显示名、状态、备注。
+async fn api_patch_person(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(p): Json<PersonPatch>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    if let Some(n) = &p.display_name {
+        if n.trim().is_empty() {
+            return Err(Error::BadRequest("显示名不能为空".into()));
+        }
+    }
+    let db = st.app.db.clone();
+    let id2 = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM person WHERE person_id = ?1",
+                rusqlite::params![id2],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("身份 {id2}")));
+            }
+            tx.execute(
+                "UPDATE person SET
+                   display_name = COALESCE(?1, display_name),
+                   status       = COALESCE(?2, status),
+                   note         = COALESCE(?3, note)
+                 WHERE person_id = ?4",
+                rusqlite::params![p.display_name, p.status, p.note, id2],
+            )?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("编辑任务失败：{e}")))??;
+
+    Ok(Json(serde_json::json!({ "ok": true, "person_id": id })))
+}
+
+#[derive(Deserialize)]
+struct BindAccount {
+    channel: String,
+    account: String,
+    seen_name: Option<String>,
+}
+
+/// 给一个人绑一个渠道账号。
+async fn api_bind_account(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(b): Json<BindAccount>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let ch = crate::model::Channel::parse(&b.channel)
+        .ok_or_else(|| Error::BadRequest(format!("未知渠道：{}", b.channel)))?;
+    if b.account.trim().is_empty() {
+        return Err(Error::BadRequest("account 不能为空".into()));
+    }
+    let db = st.app.db.clone();
+    let now = crate::db::now_ms();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM person WHERE person_id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("身份 {id}")));
+            }
+            tx.execute(
+                "INSERT INTO person_account(channel, account, person_id, seen_name,
+                                            first_seen_ms, last_seen_ms)
+                 VALUES (?1,?2,?3,?4,?5,?5)
+                 ON CONFLICT(channel, account) DO UPDATE SET
+                   person_id = excluded.person_id,
+                   seen_name = COALESCE(excluded.seen_name, person_account.seen_name),
+                   last_seen_ms = excluded.last_seen_ms",
+                rusqlite::params![ch.as_str(), b.account, id, b.seen_name, now],
+            )?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("绑定任务失败：{e}")))??;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn api_snapshots(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<Vec<crate::snapshot::SnapshotInfo>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let store = st.app.snapshots.clone();
+    let r = tokio::task::spawn_blocking(move || store.list(&db, 200))
+        .await
+        .map_err(|e| Error::Storage(format!("快照查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+async fn api_rollbacks(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<Vec<crate::rollback::RollbackRecord>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let r = tokio::task::spawn_blocking(move || crate::rollback::history(&db, 100))
+        .await
+        .map_err(|e| Error::Storage(format!("回滚查询失败：{e}")))??;
+    Ok(Json(r))
+}
+
+// ================================================================== 知识库
+//
+// 面板用的管理接口。全部走会话鉴权（`require_session`），
+// 与 `/v1/kb/*` 的 token 鉴权是两条互不替代的链。
+//
+// 这一组比 `/v1/kb/*` 多的是**运维视角**：
+//   - 每个块嵌入了没有、失败原因是什么（否则用户只知道「检索不准」但查不出为什么）
+//   - 删除文档
+//   - 重建向量（换了模型/维度之后必须能一键重来）
+
+#[derive(Debug, Serialize)]
+struct KbSummary {
+    id: String,
+    name: String,
+    description: Option<String>,
+    created_ms: i64,
+    updated_ms: i64,
+    docs: usize,
+    chunks: usize,
+    embedded: usize,
+    pending: usize,
+    failed: usize,
+    /// 文档明细。面板要能删除某篇、看到某篇的块数 ——
+    /// 只给「1 篇文档」这个数字没法管理。
+    docs_detail: Vec<serde_json::Value>,
+}
+
+async fn api_kb_list(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let v = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        db.with_read(|c| {
+            let kbs = crate::kb::list_kbs(c)?;
+            let mut out = Vec::with_capacity(kbs.len());
+            for k in kbs {
+                let docs = crate::kb::list_docs(c, &k.id)?;
+                // 按库统计各嵌入状态
+                let mut stmt = c.prepare(
+                    "SELECT ch.embed_state, COUNT(*) FROM kb_chunk ch
+                     JOIN kb_doc d ON d.id = ch.doc_id
+                     WHERE ch.kb_id = ?1 AND d.deleted_by IS NULL
+                     GROUP BY ch.embed_state",
+                )?;
+                let mut counts = std::collections::HashMap::new();
+                let rows = stmt.query_map(rusqlite::params![&k.id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?;
+                for row in rows {
+                    let (s, n) = row?;
+                    counts.insert(s, n);
+                }
+                let embedded = counts.get("done").copied().unwrap_or(0);
+                let pending = counts.get("pending").copied().unwrap_or(0);
+                let failed = counts.get("failed").copied().unwrap_or(0);
+                let docs_detail: Vec<serde_json::Value> = docs
+                    .iter()
+                    .map(|d| {
+                        serde_json::json!({
+                            "id": d.id,
+                            "title": d.title,
+                            "source": d.source,
+                            "n_chunks": d.n_chunks,
+                            "created_ms": d.created_ms,
+                        })
+                    })
+                    .collect();
+                out.push(KbSummary {
+                    id: k.id,
+                    name: k.name,
+                    description: k.description,
+                    created_ms: k.created_ms,
+                    updated_ms: k.updated_ms,
+                    docs: docs.len(),
+                    chunks: (embedded + pending + failed) as usize,
+                    embedded: embedded as usize,
+                    pending: pending as usize,
+                    failed: failed as usize,
+                    docs_detail,
+                });
+            }
+            Ok(serde_json::json!({ "kbs": out }))
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct KbCreateReq {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+async fn api_kb_create(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(b): Json<KbCreateReq>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let now = crate::db::now_ms();
+    let kb = tokio::task::spawn_blocking(move || -> Result<crate::kb::Kb> {
+        db.with_write(|c| crate::kb::create_kb(c, &b.id, &b.name, b.description.as_deref(), now))
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(serde_json::json!({ "kb": kb })))
+}
+
+async fn api_kb_health(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let cfg = st.app.cfg.clone();
+    let has_embedder = st.app.embedder.is_some();
+    let v = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        db.with_read(|c| {
+            let kbs: i64 = c.query_row("SELECT COUNT(*) FROM kb", [], |r| r.get(0))?;
+            let docs: i64 = c.query_row(
+                "SELECT COUNT(*) FROM kb_doc WHERE deleted_by IS NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            let chunks: i64 = c.query_row("SELECT COUNT(*) FROM kb_chunk", [], |r| r.get(0))?;
+            let (pending, done, failed, skipped) = crate::kb::embed_counts(c)?;
+            // 最近一条失败原因：只说「有几个失败」而不给原因，等于没说
+            let last_err: Option<String> = c
+                .query_row(
+                    "SELECT embed_err FROM kb_chunk
+                     WHERE embed_state='failed' AND embed_err IS NOT NULL
+                     ORDER BY created_ms DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
+            let state = if !cfg.kb.enable {
+                "disabled"
+            } else if !has_embedder {
+                "unavailable"
+            } else if failed > 0 {
+                "degraded"
+            } else {
+                "ok"
+            };
+            Ok(serde_json::json!({
+                "enabled": cfg.kb.enable,
+                "kb_count": kbs,
+                "doc_count": docs,
+                "chunk_count": chunks,
+                "embed": {
+                    "state": state,
+                    "model": cfg.kb.embed.model,
+                    "dim": cfg.kb.embed.dim,
+                    "url": cfg.kb.embed.url,
+                    "pending": pending, "done": done,
+                    "failed": failed, "skipped": skipped,
+                    "last_error": last_err,
+                }
+            }))
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct KbImportReq {
+    kb_id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    content: String,
+}
+
+async fn api_kb_import(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(b): Json<KbImportReq>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let opts = crate::kb::chunk::Opts {
+        max_chars: st.app.cfg.kb.chunk_max_chars,
+    };
+    let now = crate::db::now_ms();
+    let r = tokio::task::spawn_blocking(move || -> Result<crate::kb::ImportResult> {
+        db.with_write(|c| {
+            crate::kb::import_doc(
+                c,
+                &b.kb_id,
+                b.title.as_deref(),
+                b.source.as_deref(),
+                &b.content,
+                &opts,
+                now,
+            )
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+
+    if r.n_chunks > 0 && !r.duplicate {
+        crate::kb::backfill::nudge();
+    }
+    Ok(Json(serde_json::json!({
+        "doc_id": r.doc_id, "n_chunks": r.n_chunks, "duplicate": r.duplicate,
+    })))
+}
+
+/// 删除文档（逻辑删除）。它的块随之不再进检索候选。
+async fn api_kb_delete_doc(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let now = crate::db::now_ms();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|c| {
+            let n = c.execute(
+                "UPDATE kb_doc SET deleted_by = ?1, updated_ms = ?2
+                 WHERE id = ?3 AND deleted_by IS NULL",
+                rusqlite::params![now, now, id],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("文档 {id}")));
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 单个块的详情：正文、向量状态、失败原因。
+async fn api_kb_chunk_detail(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let v = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        db.with_read(|c| {
+            c.query_row(
+                "SELECT ch.id, ch.doc_id, ch.ord, ch.heading, ch.text,
+                        ch.embed_state, ch.embed_tries, ch.embed_err,
+                        ch.vec_dim, ch.vec_embedder, LENGTH(ch.vec)
+                 FROM kb_chunk ch WHERE ch.id = ?1",
+                rusqlite::params![id],
+                |r| {
+                    Ok(serde_json::json!({
+                        "id": r.get::<_, String>(0)?,
+                        "doc_id": r.get::<_, String>(1)?,
+                        "ord": r.get::<_, i64>(2)?,
+                        "heading": r.get::<_, Option<String>>(3)?,
+                        "text": r.get::<_, String>(4)?,
+                        "embed_state": r.get::<_, String>(5)?,
+                        "embed_tries": r.get::<_, i64>(6)?,
+                        "embed_err": r.get::<_, Option<String>>(7)?,
+                        "vec_dim": r.get::<_, Option<i64>>(8)?,
+                        "vec_embedder": r.get::<_, Option<String>>(9)?,
+                        "vec_bytes": r.get::<_, Option<i64>>(10)?,
+                    }))
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!("块 {id}")),
+                other => other.into(),
+            })
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct KbSearchParams {
+    q: Option<String>,
+    kb_id: Option<String>,
+    #[serde(default)]
+    topk: Option<usize>,
+}
+
+/// 面板内检索。**和线上检索走同一套融合逻辑**，只是用会话鉴权。
+///
+/// 为什么不复用 `/v1/kb/search`：那条要 API token，而面板的 cookie 不能调它
+/// （两条鉴权链刻意互不替代）。逻辑本身是同一份 `kb::rank::fuse`。
+async fn api_kb_search(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<KbSearchParams>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let q = p.q.unwrap_or_default().trim().to_string();
+    if q.is_empty() {
+        return Ok(Json(
+            serde_json::json!({ "hits": [], "degraded": "empty_query" }),
+        ));
+    }
+    let topk = p.topk.unwrap_or(5).clamp(1, 20);
+
+    let db = st.app.db.clone();
+    let kb_id = p.kb_id.clone();
+    let kb_id2 = kb_id.clone();
+    let cands = tokio::task::spawn_blocking(move || -> Result<Vec<crate::kb::rank::Candidate>> {
+        db.with_read(|c| crate::kb::load_candidates(c, kb_id2.as_deref()))
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+
+    let mut degraded: Option<&str> = None;
+    let mut last_error: Option<String> = None;
+    let mut vec_sims: Option<std::collections::HashMap<String, f64>> = None;
+
+    if let Some(emb) = st.app.embedder.as_ref() {
+        match emb.embed(std::slice::from_ref(&q)).await {
+            Ok(v) if !v.is_empty() => {
+                let qv = v[0].clone();
+                let db = st.app.db.clone();
+                let model = emb.model().to_string();
+                let dim = emb.dim();
+                let kb_id3 = kb_id.clone();
+                let vecs =
+                    tokio::task::spawn_blocking(move || -> Result<Vec<(String, Vec<f32>)>> {
+                        db.with_read(|c| crate::kb::load_vectors(c, kb_id3.as_deref(), &model, dim))
+                    })
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))??;
+                if vecs.is_empty() {
+                    degraded = Some("no_vectors_yet");
+                } else {
+                    vec_sims = Some(
+                        vecs.into_iter()
+                            .map(|(id, v)| (id, crate::kb::cosine(&qv, &v)))
+                            .collect(),
+                    );
+                }
+            }
+            Ok(_) => degraded = Some("empty_embedding"),
+            // 记下**具体错误**而不只是一个 "embed_failed" 标签。
+            // 没有它，面板上只能看到「降级了」，查不出是超时、DNS、还是 4xx ——
+            // 这次就是靠它定位的。
+            Err(e) => {
+                tracing::warn!("面板检索嵌入失败：{e}");
+                degraded = Some("embed_failed");
+                last_error = Some(format!("{e}"));
+            }
+        }
+    } else if st.app.cfg.kb.enable {
+        degraded = Some("embed_unavailable");
+    }
+
+    let opts = st.app.cfg.kb.rank.clone();
+    let hits = crate::kb::rank::fuse(&cands, &q, vec_sims.as_ref(), topk, &opts);
+    Ok(Json(serde_json::json!({
+        "hits": hits,
+        "degraded": degraded,
+        "embed_error": last_error,
+        "pool_size": cands.len(),
+    })))
+}
+
+/// 把某个库（或全部）的块重置成 `pending`，让回填重新嵌入。
+///
+/// **换模型或换维度之后必须用这个**：旧向量与新的不匹配，会被 `load_vectors`
+/// 全部剔除，表现为「检索突然只能字面命中」而没有任何报错。
+async fn api_kb_reembed(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(p): Query<KbReembedParams>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    if st.app.embedder.is_none() {
+        return Err(Error::BadRequest(
+            "嵌入服务未启用，无法重建向量（先在启动配置里开启知识库）".into(),
+        ));
+    }
+    let db = st.app.db.clone();
+    let kb_id = p.kb_id.clone();
+    let n = tokio::task::spawn_blocking(move || -> Result<usize> {
+        db.with_write(|c| {
+            let n = match kb_id.as_deref() {
+                Some(id) => c.execute(
+                    "UPDATE kb_chunk SET embed_state='pending', embed_tries=0, embed_err=NULL,
+                                         vec=NULL, vec_dim=NULL, vec_embedder=NULL
+                     WHERE kb_id = ?1",
+                    rusqlite::params![id],
+                )?,
+                None => c.execute(
+                    "UPDATE kb_chunk SET embed_state='pending', embed_tries=0, embed_err=NULL,
+                                         vec=NULL, vec_dim=NULL, vec_embedder=NULL",
+                    [],
+                )?,
+            };
+            Ok(n)
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    crate::kb::backfill::nudge();
+    Ok(Json(
+        serde_json::json!({ "reset": n, "note": "已重置，后台正在重新嵌入" }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct KbReembedParams {
+    #[serde(default)]
+    kb_id: Option<String>,
+}
+
+/// 取一篇文档的完整内容与块明细。面板的「查看/编辑」用它。
+async fn api_kb_get_doc(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let d = tokio::task::spawn_blocking(move || -> Result<crate::kb::DocDetail> {
+        db.with_read(|c| crate::kb::get_doc(c, &id))
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(
+        serde_json::to_value(d).map_err(|e| Error::Storage(format!("序列化失败：{e}")))?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct KbPatchDocReq {
+    /// `None` = 不改；`Some(None)` = 清空标题。
+    #[serde(default, deserialize_with = "double_option")]
+    title: Option<Option<String>>,
+    /// `None` = 不改原文。改了原文会重新切块并重新嵌入。
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// 区分「没传这个字段」和「传了 null」。
+///
+/// `Option<Option<T>>` 默认的 serde 行为是把 `null` 和「字段缺失」都变成 `None`，
+/// 那样就分不清「不改标题」和「把标题清空」。
+fn double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let v: Option<T> = Option::deserialize(de)?;
+    Ok(Some(v))
+}
+
+/// 改文档。只改标题时不动块；改了原文则**重新切块 + 重新嵌入**。
+async fn api_kb_patch_doc(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(b): Json<KbPatchDocReq>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let title_owned: Option<Option<String>> = b.title.clone();
+    let db = st.app.db.clone();
+    let opts = crate::kb::chunk::Opts {
+        max_chars: st.app.cfg.kb.chunk_max_chars,
+    };
+    let now = crate::db::now_ms();
+    let (n, actually_rechunked) = tokio::task::spawn_blocking(move || -> Result<(usize, bool)> {
+        db.with_write(|c| {
+            let title_ref = match &title_owned {
+                None => None,
+                Some(None) => Some(None),
+                Some(Some(t)) => Some(Some(t.as_str())),
+            };
+            crate::kb::update_doc(c, &id, title_ref, b.content.as_deref(), &opts, now)
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+
+    // 只有**真的重切了**才催回填：内容没变时块还是原来那些、可能早就嵌好了，
+    // 催一次纯属空转。这里用 `actually_rechunked` 而不是 `changed_content`：
+    // 后者只说明「客户端传了内容」，不知道后端是否真重切（哈希没变会跳过）。
+    if actually_rechunked {
+        crate::kb::backfill::nudge();
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "n_chunks": n,
+        "rechunked": actually_rechunked,
+        "note": if actually_rechunked {
+            "已重新切块，向量在后台重新生成；完成前这些块只能被字面命中"
+        } else {
+            "已更新"
+        },
+    })))
+}

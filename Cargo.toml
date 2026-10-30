@@ -1,0 +1,42 @@
+[package]
+name = "bluewhale-memory"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "蓝鲸记忆中枢 — 跨渠道 AI 记忆服务"
+license = "MIT"
+
+[[bin]]
+name = "bluewhale-memory"
+path = "src/main.rs"
+
+[lib]
+name = "bluewhale_memory"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.7", features = ["trace", "limit", "timeout"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+sha2 = "0.10"
+# 知识库要调外部嵌入服务。用 rustls 不用 native-tls：
+# 不引 OpenSSL，交叉编译时才不会踩系统库的坑。
+# 实测代价：二进制净增约 2.4 MB（5.6 → 约 8 MB），见 docs/知识库接入方案.md §0。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

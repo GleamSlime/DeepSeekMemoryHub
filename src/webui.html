@@ -1,0 +1,2466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>蓝鲸记忆中枢 · 管理后台</title>
+<style>
+:root{
+  --bg:#0b0e14; --bg2:#0f141d; --panel:#141a24; --panel2:#1a2130; --panel3:#202939;
+  --line:#232c3b; --line2:#2d3849; --fg:#dbe4f0; --fg2:#9aa7b8; --dim:#6b7789;
+  --accent:#3b82f6; --accent2:#60a5fa;
+  --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; --purple:#a855f7;
+  --sidebar:210px;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);color:var(--fg);
+  font:13.5px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  display:flex;overflow:hidden;
+}
+
+/* ============ 侧栏 ============ */
+.sidebar{
+  width:var(--sidebar);flex:none;background:var(--bg2);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;height:100vh;
+}
+.brand{
+  padding:18px 18px 16px;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:9px;
+}
+.brand .ico{font-size:21px;line-height:1}
+.brand .nm{font-size:14.5px;font-weight:600;letter-spacing:.3px}
+.brand .vr{font-size:11px;color:var(--dim);margin-top:1px}
+nav{padding:10px 10px;flex:1;overflow-y:auto}
+.navgrp{font-size:10.5px;color:#4d586b;text-transform:uppercase;letter-spacing:.8px;
+  padding:13px 9px 6px;font-weight:600}
+.navitem{
+  display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:7px;
+  color:var(--fg2);cursor:pointer;user-select:none;margin-bottom:1px;font-size:13px;
+}
+.navitem:hover{background:var(--panel);color:var(--fg)}
+.navitem.on{background:var(--accent);color:#fff}
+.navitem.on .cnt{background:rgba(255,255,255,.22);color:#fff}
+.navitem .ico{width:15px;text-align:center;font-size:13px;flex:none}
+.navitem .cnt{
+  margin-left:auto;font-size:10.5px;background:var(--panel3);color:var(--dim);
+  padding:1px 6px;border-radius:9px;font-variant-numeric:tabular-nums;
+}
+.sidefoot{
+  padding:11px 14px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);
+  display:flex;align-items:center;gap:8px;
+}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
+.dot.bad{background:var(--err)}
+
+/* ============ 主区 ============ */
+.main{flex:1;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+.topbar{
+  height:54px;flex:none;border-bottom:1px solid var(--line);background:var(--bg2);
+  display:flex;align-items:center;padding:0 22px;gap:14px;
+}
+.topbar h1{font-size:15px;margin:0;font-weight:600}
+.crumb{color:var(--dim);font-size:12.5px}
+.topbar .sp{flex:1}
+.userchip{
+  display:flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--line);
+  padding:5px 11px;border-radius:20px;font-size:12.5px;
+}
+.content{flex:1;overflow-y:auto;padding:22px}
+
+/* ============ 通用控件 ============ */
+button{
+  background:var(--panel2);color:var(--fg);border:1px solid var(--line2);border-radius:7px;
+  padding:7px 13px;cursor:pointer;font-size:12.5px;font-family:inherit;
+}
+button:hover{background:var(--panel3);border-color:#3d4b60}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover{background:#4b8ef7}
+button.danger{border-color:#5c2020;color:#fca5a5}
+button.danger:hover{background:#3a1616}
+input,select{
+  background:#0d1219;border:1px solid var(--line);color:var(--fg);
+  padding:7px 11px;border-radius:7px;font-size:12.5px;font-family:inherit;
+}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+input[type=search]{width:230px}
+a{color:var(--accent2);text-decoration:none}
+a:hover{text-decoration:underline}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+.dim{color:var(--dim)}
+.nowrap{white-space:nowrap}
+
+/* ============ 卡片 ============ */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:12px;margin-bottom:20px}
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:15px 16px;
+  cursor:pointer;transition:border-color .12s,background .12s;position:relative;
+}
+.card:hover{border-color:var(--accent);background:var(--panel2)}
+.card .k{color:var(--dim);font-size:11.5px;margin-bottom:7px;display:flex;align-items:center;gap:5px}
+.card .v{font-size:23px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15}
+.card .m{font-size:11px;color:var(--dim);margin-top:5px}
+.card .arrow{
+  position:absolute;right:13px;top:13px;color:var(--dim);font-size:13px;opacity:0;
+  transition:opacity .12s;
+}
+.card:hover .arrow{opacity:1;color:var(--accent)}
+
+/* ============ 表格 ============ */
+.tablewrap{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:9px 14px;border-bottom:1px solid var(--line);font-size:12.5px}
+th{background:var(--bg2);color:var(--dim);font-weight:500;font-size:11.5px;
+   position:sticky;top:0;z-index:1;white-space:nowrap}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:var(--panel2)}
+td.num{text-align:right;font-variant-numeric:tabular-nums;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.tbl-head{
+  display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line);
+  background:var(--bg2);flex-wrap:wrap;
+}
+.tbl-head .t{font-size:13px;font-weight:500}
+.tbl-head .sp{flex:1}
+.empty{color:var(--dim);text-align:center;padding:44px 20px;font-size:13px}
+
+/* ============ 徽章 ============ */
+/* HUD */
+.hud-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:22px}
+.hud-cell{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.hud-cell.warn{border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.06)}
+.hud-k{color:var(--dim);font-size:11.5px;margin-bottom:6px}
+.hud-v{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15}
+.hud-m{font-size:11px;color:var(--dim);margin-top:5px}
+.hud-bar{height:4px;border-radius:2px;background:var(--panel3);margin-top:8px;overflow:hidden}
+.hud-bar>i{display:block;height:100%;background:var(--accent);border-radius:2px}
+
+/* 计划摘要 + 条目卡片 */
+.psummary{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:13px 16px;margin-bottom:12px;line-height:1.7;font-size:13px}
+.pcards{display:flex;flex-direction:column;gap:9px;margin-bottom:24px}
+.pitem{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:12px 15px;border-left:3px solid var(--line2)}
+.pitem.st-done{border-left-color:var(--ok);opacity:.82}
+.pitem.st-deferred{border-left-color:var(--warn)}
+.pitem.st-dropped{border-left-color:var(--err);opacity:.7}
+.pitem.st-todo{border-left-color:var(--accent)}
+.pitem-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.pitem-head .pnum{width:19px;height:19px;border-radius:50%;background:var(--panel3);
+  color:var(--dim);font-size:11px;display:flex;align-items:center;justify-content:center;flex:none}
+.pitem-head .ptitle{font-weight:500;font-size:13.5px}
+.pitem-head .sp{flex:1;min-width:8px}
+.pwhy{font-size:11.5px;color:var(--dim);line-height:1.65;margin-top:5px;padding-left:28px}
+.pwhy b{color:var(--fg2);font-weight:500}
+.pwhy.out{color:var(--fg2)}
+
+/* 注入回放 */
+.trace{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  margin-bottom:12px;overflow:hidden}
+.trace-head{display:flex;align-items:center;gap:9px;padding:10px 14px;
+  background:var(--bg2);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.trace-head .sp{flex:1}
+.trace-items{padding:6px 0}
+.titem{display:flex;align-items:center;gap:9px;padding:5px 14px;font-size:12.5px}
+.titem.drop{opacity:.5}
+.titem .tbadge{width:14px;text-align:center;flex:none;font-size:11px}
+.titem.kept .tbadge{color:var(--ok)}
+.titem.drop .tbadge{color:var(--dim)}
+.titem .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.titem .sp{flex:1}
+
+/* 配置网格 */
+.cfg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
+  gap:11px;margin-bottom:18px}
+.cfg-grid .editrow{margin-bottom:0}
+.cfg-grid input{width:100%}
+
+/* 时间线 */
+.timeline{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:6px 18px 14px;position:relative}
+.tday{padding:13px 0;border-bottom:1px solid var(--line)}
+.tday:last-child{border-bottom:0}
+.tday-head{display:flex;align-items:center;gap:10px;margin-bottom:9px}
+.tcycle{background:var(--panel3);border-radius:6px;padding:2px 9px;font-size:11.5px;color:var(--fg2)}
+.tsum{font-size:12.5px;color:var(--fg2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tday-head .sp{flex:1}
+.tnode{display:flex;gap:10px;align-items:baseline;padding:4px 0 4px 10px;font-size:12.5px;
+  border-left:1px solid var(--line);margin-left:6px}
+.tnode .tic{flex:none;width:16px;text-align:center;font-size:12px;margin-left:-18px;
+  background:var(--panel);border-radius:50%}
+.tnode .ttx{flex:1;line-height:1.6}
+.tnode .t1{display:block}
+.tnode .t2{display:block;color:var(--dim);font-size:11.5px;margin-top:1px}
+.tnode .ttm{flex:none;color:var(--dim);font-size:11px}
+.tgap{color:var(--warn);font-size:12px;padding:7px 0 7px 12px;margin-left:6px;
+  border-left:1px dashed rgba(245,158,11,.5)}
+.tday.gap .tday-head .tsum{color:var(--dim)}
+
+/* 规划条目 */
+.planitem{background:var(--bg2);border:1px solid var(--line);border-radius:9px;
+  padding:11px 14px;margin-bottom:9px}
+.planhead{display:flex;align-items:center;gap:10px;margin-bottom:5px}
+.planhead .ord{width:20px;height:20px;border-radius:50%;background:var(--panel3);
+  color:var(--dim);font-size:11px;display:flex;align-items:center;justify-content:center;flex:none}
+.planmeta{font-size:11.5px;margin-bottom:6px;display:flex;gap:5px;flex-wrap:wrap}
+.planwhy{font-size:11.5px;color:var(--dim);line-height:1.6;margin-top:3px}
+
+/* 情绪轴 */
+.mrow{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.mrow .mk{width:52px;font-size:12px;color:var(--dim);flex:none}
+.mrow .mlo,.mrow .mhi{font-size:10.5px;color:#4d586b;flex:none;width:26px}
+.mrow .mhi{text-align:right}
+.mbar{flex:1;height:7px;background:var(--panel3);border-radius:4px;position:relative}
+.mbar .mid{position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:var(--line2)}
+.mbar i{position:absolute;top:0;bottom:0;border-radius:4px;transition:width .2s}
+.mrow .mv{width:44px;text-align:right;font-size:12px;color:var(--fg2);flex:none}
+
+/* 情绪页的事件列表 */
+.evlist{background:var(--bg2);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.evitem{display:flex;align-items:center;gap:10px;padding:7px 12px;
+  border-bottom:1px solid var(--line);font-size:12.5px}
+.evitem:last-child{border-bottom:0}
+.evitem:hover{background:var(--panel2)}
+
+/* 分段单选控件（替代 select） */
+.seg{display:inline-flex;background:var(--panel2);border:1px solid var(--line);
+  border-radius:7px;padding:2px;gap:1px}
+.seg button{
+  background:transparent;border:0;border-radius:5px;padding:4px 11px;font-size:12px;
+  color:var(--fg2);cursor:pointer;font-family:inherit;
+}
+.seg button:hover{color:var(--fg);background:rgba(255,255,255,.04)}
+.seg button.on{background:var(--accent);color:#fff}
+.seg button.on:hover{background:var(--accent)}
+
+/* 身份选择：一排可点的名词，比下拉框一眼看全，也不用点两次 */
+.chips{display:flex;flex-wrap:wrap;gap:7px;max-height:150px;overflow-y:auto;
+  padding:2px 0}
+.chip{
+  padding:5px 11px;border:1px solid var(--line);border-radius:999px;
+  background:var(--panel2);color:var(--fg2);font-size:12.5px;cursor:pointer;
+  font-family:inherit;
+}
+.chip:hover{color:var(--fg);border-color:var(--accent)}
+.chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.chip.dis{opacity:.38;cursor:not-allowed}
+.chip.dis:hover{border-color:var(--line);color:var(--fg2)}
+
+/* 编辑表单 */
+.editrow{display:flex;flex-direction:column;gap:5px;margin-bottom:13px}
+.editrow label{font-size:11.5px;color:var(--dim)}
+.editrow input,.editrow textarea{
+  width:100%;background:#0d1219;border:1px solid var(--line);color:var(--fg);
+  padding:8px 11px;border-radius:7px;font-size:13px;font-family:inherit;resize:vertical;
+}
+.editrow textarea{min-height:90px;line-height:1.65}
+.editrow input:focus,.editrow textarea:focus{outline:none;border-color:var(--accent)}
+.drawer-foot{padding:13px 18px;border-top:1px solid var(--line);display:flex;gap:9px}
+.drawer-foot .sp{flex:1}
+
+.badge{
+  display:inline-block;padding:1.5px 8px;border-radius:20px;font-size:11px;
+  font-weight:500;white-space:nowrap;
+}
+.b-mc{background:rgba(34,197,94,.14);color:#4ade80}
+.b-qq{background:rgba(59,130,246,.14);color:#60a5fa}
+.b-live{background:rgba(168,85,247,.14);color:#c084fc}
+.b-system{background:rgba(107,119,137,.18);color:#9aa7b8}
+.b-ok{background:rgba(34,197,94,.14);color:#4ade80}
+.b-warn{background:rgba(245,158,11,.14);color:#fbbf24}
+.b-err{background:rgba(239,68,68,.14);color:#f87171}
+.b-curated{background:rgba(245,158,11,.14);color:#fbbf24}
+.b-extracted{background:rgba(107,119,137,.18);color:#9aa7b8}
+.b-forgotten{background:rgba(239,68,68,.12);color:#f87171}
+
+/* ============ 条形 ============ */
+.bar{height:5px;border-radius:3px;background:var(--panel3);overflow:hidden;min-width:52px}
+.bar>i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.imp{display:flex;align-items:center;gap:7px}
+.imp .n{font-size:11px;color:var(--dim);min-width:26px;font-variant-numeric:tabular-nums}
+
+/* ============ 分页 ============ */
+.pager{
+  display:flex;align-items:center;gap:9px;padding:11px 14px;border-top:1px solid var(--line);
+  background:var(--bg2);font-size:12.5px;color:var(--dim);
+}
+.pager .sp{flex:1}
+
+/* ============ 详情抽屉 ============ */
+.drawer-mask{
+  position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;display:none;
+}
+.drawer-mask.on{display:block}
+.drawer{
+  position:fixed;top:0;right:0;bottom:0;width:520px;max-width:92vw;background:var(--panel);
+  border-left:1px solid var(--line2);z-index:51;display:flex;flex-direction:column;
+  transform:translateX(100%);transition:transform .18s ease-out;
+}
+.drawer.on{transform:translateX(0)}
+.drawer-head{
+  padding:15px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;
+}
+.drawer-head .t{font-size:14px;font-weight:600}
+.drawer-head .sp{flex:1}
+.drawer-body{padding:16px 18px;overflow-y:auto;flex:1}
+.kv{display:grid;grid-template-columns:100px 1fr;gap:9px 14px;font-size:12.5px}
+.kv .k{color:var(--dim)}
+.kv .v{word-break:break-word}
+pre.body{
+  background:#0d1219;border:1px solid var(--line);border-radius:8px;padding:13px;
+  font-size:12.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;
+  font-family:inherit;margin:0;
+}
+
+/* ============ 图表 ============ */
+.chart{display:flex;align-items:flex-end;gap:6px;height:110px;padding:14px;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;margin-bottom:20px}
+.chart .col{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;
+  justify-content:flex-end}
+.chart .col i{display:block;width:100%;background:linear-gradient(180deg,var(--accent),#1d4ed8);
+  border-radius:4px 4px 0 0;min-height:2px;transition:opacity .12s}
+.chart .col:hover i{opacity:.75}
+.chart .col span{font-size:10px;color:var(--dim);white-space:nowrap}
+.chart .col b{font-size:11px;color:var(--fg2);font-weight:500;font-variant-numeric:tabular-nums}
+
+.toast{
+  position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(80px);
+  background:var(--panel3);border:1px solid var(--line2);padding:10px 20px;border-radius:9px;
+  font-size:13px;z-index:99;transition:transform .2s;box-shadow:0 8px 30px rgba(0,0,0,.5);
+}
+.toast.on{transform:translateX(-50%) translateY(0)}
+.toast.bad{border-color:#5c2020;background:#2a1414;color:#fca5a5}
+
+.sectitle{font-size:13px;font-weight:600;margin:22px 0 11px;display:flex;align-items:center;gap:8px}
+.sectitle:first-child{margin-top:0}
+.sectitle .hint{font-weight:400;color:var(--dim);font-size:11.5px}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="brand">
+    <span class="ico">🐋</span>
+    <div>
+      <div class="nm">蓝鲸记忆中枢</div>
+      <div class="vr" id="brandVer">管理后台</div>
+    </div>
+  </div>
+  <nav id="nav"></nav>
+  <div class="sidefoot">
+    <span class="dot" id="healthDot"></span>
+    <span id="healthTxt">连接中…</span>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="topbar">
+    <h1 id="pageTitle">概览</h1>
+    <span class="crumb" id="pageCrumb"></span>
+    <span class="sp"></span>
+    <button id="btnRefresh">刷新</button>
+    <div class="userchip">
+      <span>👤</span><span id="whoami">—</span>
+      <a href="#" id="btnLogout" style="margin-left:6px;font-size:11.5px">登出</a>
+    </div>
+  </div>
+  <div class="content" id="content"></div>
+</div>
+
+<div class="drawer-mask" id="mask"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <span class="t" id="drawerTitle">详情</span>
+    <span class="sp"></span>
+    <button id="drawerClose">关闭</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+  <div class="drawer-foot" id="drawerFoot" style="display:none"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================================================ 工具
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtNum = n => (n ?? 0).toLocaleString('zh-CN');
+const fmtBytes = n => {
+  const u=['B','KB','MB','GB','TB']; let v=n??0,i=0;
+  while(v>=1024&&i<u.length-1){v/=1024;i++;}
+  return v.toFixed(1)+' '+u[i];
+};
+const pad = n => String(n).padStart(2,'0');
+const fmtTime = ms => {
+  if(!ms) return '—';
+  const d=new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+const fmtAgo = ms => {
+  if(!ms) return '—';
+  const s=Math.floor((Date.now()-ms)/1000);
+  if(s<60) return s+' 秒前';
+  if(s<3600) return Math.floor(s/60)+' 分钟前';
+  if(s<86400) return Math.floor(s/3600)+' 小时前';
+  return Math.floor(s/86400)+' 天前';
+};
+let toastTimer;
+function toast(msg, bad){
+  const t=$('toast');
+  t.textContent=msg; t.className='toast on'+(bad?' bad':'');
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>t.className='toast',2600);
+}
+const chantBadge = c => `<span class="badge b-${esc(c)}">${esc(c)}</span>`;
+
+/// 重要度条。0–1 映射成宽度百分比 + 数字。
+///
+/// 之前这个函数被调用了 6 次却**从未定义**，导致事件/事实/手帐三个页面
+/// 渲染时抛 ReferenceError 整页失败——而日记和身份页不用它，所以是好的。
+/// 这种「一半页面坏、一半好」的故障最容易被误判成后端问题。
+function impBar(v){
+  const n = (typeof v === 'number' && isFinite(v)) ? Math.max(0, Math.min(1, v)) : 0;
+  const color = n >= 0.8 ? 'var(--ok)' : n >= 0.5 ? 'var(--accent)' : 'var(--dim)';
+  return `<div class="imp"><span class="n">${n.toFixed(2)}</span>
+    <div class="bar" style="flex:1"><i style="width:${(n*100).toFixed(0)}%;background:${color}"></i></div></div>`;
+}
+
+/// GET 取 JSON。**只发 GET** —— 想写请用 `apiDo`。
+///
+/// 这个限制是刻意的：以前有人给 `api()` 传了 `{method:'POST'}`，
+/// 而它只认一个参数，那一行于是静默发了个 GET，写操作根本没发生。
+/// 面板上看是「点了没反应」，实际是请求方法错了。宁可多一个函数名。
+async function api(path){
+  return apiDo('GET', path);
+}
+
+/// 发一个请求并解析 JSON。`method` 必须显式给。
+async function apiDo(method, path, body){
+  const opt = {method, headers:{'Accept':'application/json'}};
+  if(body !== undefined){
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = typeof body === 'string' ? body : JSON.stringify(body);
+  }
+  const r = await fetch(path, opt);
+  if(r.status===401){ location.href='/login'; throw new Error('未登录'); }
+  if(!r.ok){
+    let d=r.status+'';
+    try{const j=await r.json(); if(j.error) d=j.error;}catch(e){}
+    throw new Error(d);
+  }
+  // 204 / 空 body 不能 json()
+  const txt = await r.text();
+  return txt ? JSON.parse(txt) : {};
+}
+
+// ============================================================ 导航
+const PAGES = {
+  overview:  {title:'概览',     icon:'▤', url:'/api/admin/overview'},
+  events:    {title:'事件',     icon:'⚡', url:'/api/admin/events'},
+  facts:     {title:'事实',     icon:'💡', url:'/api/admin/facts'},
+  journal:   {title:'手帐',     icon:'📔', url:'/api/admin/journal'},
+  diaries:   {title:'日记',     icon:'📖', url:'/api/admin/diaries'},
+  plans:     {title:'规划',     icon:'🗺', url:'/api/admin/plans'},
+  mood:      {title:'情绪',     icon:'💗', url:'/api/admin/moods'},
+  self:      {title:'自我认知', icon:'🪞', url:'/api/admin/self'},
+  relations: {title:'关系',     icon:'🤝', url:'/api/admin/relations'},
+  traits:    {title:'特质',     icon:'🌱', url:'/api/admin/traits'},
+  promises:  {title:'承诺',     icon:'📜', url:'/api/admin/promises'},
+  messages:  {title:'群消息',   icon:'💬', url:'/api/admin/messages'},
+  replay:    {title:'注入回放', icon:'🔍', url:'/api/admin/recall-traces'},
+  kb:        {title:'知识库',   icon:'📚', url:'/api/admin/kb'},
+  settings:  {title:'配置',     icon:'🎛', url:'/api/admin/settings'},
+  persons:   {title:'身份',     icon:'👥', url:'/api/admin/persons'},
+  snapshots: {title:'快照',     icon:'💾', url:'/api/admin/snapshots'},
+  rollbacks: {title:'回滚',     icon:'⏪', url:'/api/admin/rollbacks'},
+  system:    {title:'系统',     icon:'⚙', url:null},
+};
+const NAV_GROUPS = [
+  {label:'总览', items:['overview']},
+  {label:'记忆数据', items:['events','facts','journal','diaries']},
+  {label:'知识库', items:['kb']},
+  {label:'规划', items:['plans']},
+  {label:'人格', items:['mood','self','relations','traits','promises']},
+  {label:'渠道', items:['messages']},
+  {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
+];
+
+let state = { page:'overview', params:{}, overview:null };
+const counts = {};
+
+function renderNav(){
+  $('nav').innerHTML = NAV_GROUPS.map(g => `
+    <div class="navgrp">${g.label}</div>
+    ${g.items.map(k=>{
+      const p=PAGES[k], c=counts[k];
+      return `<div class="navitem ${state.page===k?'on':''}" data-page="${k}">
+        <span class="ico">${p.icon}</span><span>${p.title}</span>
+        ${c!=null?`<span class="cnt">${fmtNum(c)}</span>`:''}
+      </div>`;
+    }).join('')}`).join('');
+  $('nav').querySelectorAll('.navitem').forEach(el=>{
+    el.onclick=()=>go(el.dataset.page);
+  });
+}
+
+function go(page, params){
+  state.page = page;
+  state.params = params || {};
+  history.replaceState(null,'','?p='+page);
+  renderNav();
+  $('pageTitle').textContent = PAGES[page].title;
+  $('pageCrumb').textContent = '';
+  render();
+}
+
+// ============================================================ 渲染
+async function render(){
+  const c=$('content');
+  try{
+    if(state.page==='overview') return await renderOverview(c);
+    if(state.page==='system') return await renderSystem(c);
+    if(state.page==='plans') return await renderPlans(c);
+    if(state.page==='mood') return await renderMood(c);
+    if(state.page==='self') return await renderSelf(c);
+    if(state.page==='relations') return await renderRelations(c);
+    if(state.page==='traits') return await renderTraits(c);
+    if(state.page==='promises') return await renderPromises(c);
+    if(state.page==='snapshots') return await renderSnapshots(c);
+    if(state.page==='rollbacks') return await renderRollbacks(c);
+    // replay 有专用渲染函数（renderReplay），**必须在这里分派**。
+    // 少了这一行它就会掉进最后那句 renderTable(c, state.page) 兜底，
+    // 而 renderTable 只认通用表名，'replay' 不在其中 ——
+    // 于是页面标题下面只剩一行「共 30 条」，明细一条都没有。
+    // 实测 2026-10-30：用户报「只显示了[注入回放 共 30 条]其余什么也没显示」。
+    if(state.page==='replay') return await renderReplay(c);
+    if(state.page==='kb') return await renderKb(c);
+    return await renderTable(c, state.page);
+  }catch(e){
+    // 渲染错误要连堆栈一起显示：只写「加载失败」会让人以为是网络或后端问题，
+    // 而实际可能是前端某个函数没定义。
+    console.error('[render]', state.page, e);
+    c.innerHTML = `<div class="empty">
+      <div style="color:var(--err);font-weight:600;margin-bottom:8px">渲染失败：${esc(e.message)}</div>
+      <div class="dim" style="font-size:12px">页面：${esc(state.page)}</div>
+      <pre class="body" style="margin-top:12px;text-align:left">${esc((e.stack||'').split('\n').slice(0,6).join('\n'))}</pre>
+    </div>`;
+  }
+}
+
+// ---------- 概览
+async function renderOverview(c){
+  const o = await api('/api/admin/overview');
+  state.overview = o;
+
+  // 侧栏计数
+  const t = Object.fromEntries(o.tables);
+  counts.events=t.event; counts.facts=t.fact; counts.journal=t.journal; counts.diaries=t.diary;
+  counts.persons=t.person; counts.snapshots=t.snapshot; counts.rollbacks=t.rollback_log;
+  renderNav();
+
+  const card=(k,v,m,page,p)=>
+    `<div class="card" ${page?`data-go="${page}"`:`data-go="events" data-p="${p||''}"`}>
+       <span class="arrow">→</span>
+       <div class="k">${k}</div><div class="v">${v}</div>
+       ${m?`<div class="m">${m}</div>`:''}
+     </div>`;
+
+  c.innerHTML = `
+    <div class="cards">
+      ${card('总记忆行数', fmtNum(o.total_rows), '全部表合计', 'events')}
+      ${card('事件', fmtNum(t.event||0), '来自各渠道的原始经历', 'events')}
+      ${card('事实', fmtNum(t.fact||0), '它相信的事', 'facts')}
+      ${card('手帐', fmtNum(t.journal||0), '筛选后的生活记录', 'journal')}
+      ${card('日记', fmtNum(t.diary||0), '它写的散文', 'diaries')}
+      ${card('身份', fmtNum(t.person||0), '认识的人（跨渠道合并后）', 'persons')}
+      ${card('写入次数', fmtNum(o.writes), `去重命中 ${fmtNum(o.dedup_hits)}`, null)}
+      ${card('WAL', fmtBytes(o.wal_bytes), '未合并到主库', null)}
+      ${card('最近快照', o.latest_snapshot_ms?fmtAgo(o.latest_snapshot_ms):'无',
+             o.latest_snapshot_ms?fmtTime(o.latest_snapshot_ms):'尚未拍过快照', 'snapshots')}
+      ${card('回滚记录', fmtNum(o.rollback_count), o.forgotten_rows?`${fmtNum(o.forgotten_rows)} 行待清理`:'无待清理', 'rollbacks')}
+    </div>
+
+    <div class="sectitle">渠道分布 <span class="hint">记忆来自哪里</span></div>
+    ${o.by_channel.length ? `<div class="cards">
+      ${o.by_channel.map(([ch,n])=>`<div class="card" data-go="events" data-chan="${esc(ch)}">
+        <span class="arrow">→</span>
+        <div class="k">${chantBadge(ch)}</div>
+        <div class="v">${fmtNum(n)}</div>
+        <div class="m">条事件</div></div>`).join('')}
+    </div>` : '<div class="empty">还没有事件</div>'}
+
+    <div class="sectitle">最近 7 天 <span class="hint">每日事件数</span></div>
+    ${o.daily.length ? `<div class="chart">
+      ${(()=>{const mx=Math.max(...o.daily.map(d=>d[1]),1); return o.daily.map(([d,n])=>`
+        <div class="col" title="${esc(d)}: ${n} 条">
+          <b>${n}</b><i style="height:${Math.max(2,(n/mx)*100)}%"></i>
+          <span>${esc(d.slice(5))}</span>
+        </div>`).join('');})()}
+    </div>` : '<div class="empty">最近的日期里没有事件</div>'}
+
+    <div class="sectitle">数据表 <span class="hint">点击查看</span></div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>表名</th><th class="num">行数</th><th>说明</th></tr></thead>
+      <tbody>${o.tables.map(([n,cnt])=>`
+        <tr style="cursor:pointer" data-tbl="${esc(n)}">
+          <td class="mono">${esc(n)}</td>
+          <td class="num">${fmtNum(cnt)}</td>
+          <td class="dim">${TABLE_DESC[n]||''}</td>
+        </tr>`).join('')}</tbody>
+    </table></div>`;
+
+  // 卡片/表名点击 → 跳转到对应页并带过滤条件
+  c.querySelectorAll('[data-go]').forEach(el=>{
+    el.onclick=()=>{
+      const p=el.dataset.p, g=el.dataset.go, ch=el.dataset.chan;
+      const params={};
+      if(ch) params.channel=ch;
+      go(g, params);
+    };
+  });
+  c.querySelectorAll('[data-tbl]').forEach(el=>{
+    el.onclick=()=>{
+      const map={event:'events',fact:'facts',journal:'journal',diary:'diaries',
+                 person:'persons',snapshot:'snapshots',rollback_log:'rollbacks'};
+      const target=map[el.dataset.tbl];
+      if(target) go(target);
+      else showDrawer('表：'+el.dataset.tbl,
+        `<div class="kv"><div class="k">表名</div><div class="v mono">${esc(el.dataset.tbl)}</div>
+         <div class="k">行数</div><div class="v mono">${fmtNum((state.overview.tables.find(x=>x[0]===el.dataset.tbl)||[0,0])[1])}</div>
+         <div class="k">说明</div><div class="v">${TABLE_DESC[el.dataset.tbl]||'（无专属页面）'}</div></div>`);
+    };
+  });
+}
+
+const TABLE_DESC = {
+  person:'跨渠道的人', person_account:'渠道账号', event:'原始事件', fact:'事实',
+  journal:'手帐', diary:'日记', self_narrative:'自我认知', mood:'情绪',
+  trait:'人格特质', promise:'承诺', relation:'关系', channel_message:'渠道消息',
+  recall_log:'检索记录', snapshot:'快照', rollback_log:'回滚审计',
+};
+
+// ---------- 通用表格
+async function renderTable(c, page){
+  const cfg = {
+    events:    {cols:['时间','渠道','类型','摘要','重要度'], key:'events'},
+    facts:     {cols:['键','值','范围','层级','状态','重要度','回忆'], key:'facts'},
+    journal:   {cols:['时间','类型','摘要','重要度'], key:'journal'},
+    diaries:   {cols:['窗口','类型','标题','长度'], key:'diaries'},
+    persons:   {cols:['显示名','状态','渠道账号','首次出现'], key:'persons'},
+    messages:  {cols:[], key:'messages'},
+  }[page];
+
+  const qs = new URLSearchParams({page:state.params.page||1, size:state.params.size||50});
+  ['q','channel','kind','status','tier','forgotten'].forEach(k=>{
+    if(state.params[k]) qs.set(k, state.params[k]);
+  });
+
+  const data = await api(PAGES[page].url+'?'+qs.toString());
+  const items = data.items || data;
+  const total = data.total ?? items.length;
+  const pages = data.pages ?? 1;
+
+  if(!items.length){
+    c.innerHTML = filterBar(page, state.params) +
+      '<div class="empty">没有数据'+(hasFilter(state.params)?'（试试清空筛选条件）':'')+'</div>';
+    bindFilters(page);
+    return;
+  }
+
+  let head='', rows='';
+  if(page==='events'){
+    head='<tr><th>时间</th><th>渠道</th><th>类型</th><th>摘要</th><th style="width:130px">重要度</th></tr>';
+    rows=items.map(e=>`<tr style="cursor:pointer" data-ev='${esc(JSON.stringify(e))}'>
+      <td class="mono nowrap">${fmtTime(e.at_ms)}</td>
+      <td>${chantBadge(e.channel)}</td>
+      <td class="mono dim">${esc(e.kind)}</td>
+      <td>${esc(e.summary)}</td>
+      <td>${impBar(e.importance)}</td></tr>`).join('');
+  } else if(page==='facts'){
+    head='<tr><th>键</th><th>值</th><th>范围</th><th>层级</th><th>状态</th><th style="width:110px">重要度</th><th class="num">回忆</th></tr>';
+    rows=items.map(f=>`<tr style="cursor:pointer" data-fact='${esc(JSON.stringify(f))}'>
+      <td>${esc(f.key)}</td>
+      <td>${esc(f.value)}</td>
+      <td class="dim">${esc(f.scope)}</td>
+      <td><span class="badge b-${esc(f.tier)}">${esc(f.tier)}</span></td>
+      <td><span class="badge ${f.status==='confirmed'?'b-ok':'b-warn'}">${esc(f.status)}</span></td>
+      <td>${impBar(f.importance)}</td>
+      <td class="num">${f.recall_count}</td></tr>`).join('');
+  } else if(page==='journal'){
+    head='<tr><th>时间</th><th>类型</th><th>摘要</th><th style="width:130px">重要度</th></tr>';
+    rows=items.map(j=>`<tr style="cursor:pointer" data-jr='${esc(JSON.stringify(j))}'>
+      <td class="mono nowrap">${fmtTime(j.at_ms)}</td>
+      <td class="mono dim">${esc(j.type_)}</td>
+      <td>${esc(j.summary)}</td>
+      <td>${impBar(j.importance)}</td></tr>`).join('');
+  } else if(page==='diaries'){
+    head='<tr><th>窗口</th><th>类型</th><th>标题</th><th class="num">字数</th></tr>';
+    rows=items.map(d=>`<tr style="cursor:pointer" data-dy='${esc(JSON.stringify(d))}'>
+      <td class="mono nowrap">${fmtTime(d.window_start_ms)}</td>
+      <td><span class="badge b-q">${esc(d.kind)}</span></td>
+      <td>${esc(d.title||'（无标题）')}</td>
+      <td class="num">${(d.body||'').length}</td></tr>`).join('');
+  } else if(page==='messages'){
+    head='<tr><th>时间</th><th>渠道</th><th>群/房间</th><th>发送者</th><th>内容</th><th>已读</th></tr>';
+    rows=items.map(m=>`<tr>
+      <td class="mono nowrap">${fmtTime(m.at_ms)}</td>
+      <td>${chantBadge(m.channel)}</td>
+      <td class="mono dim">${esc(m.group_id||'—')}</td>
+      <td>${esc(m.sender_name||m.account||'—')}</td>
+      <td>${esc(m.content)}</td>
+      <td>${m.consumed ? '<span class="badge b-ok">是</span>' : '<span class="badge b-extracted">未</span>'}</td>
+    </tr>`).join('');
+  } else if(page==='persons'){
+    head='<tr><th>显示名</th><th>状态</th><th>渠道账号</th><th>首次出现</th></tr>';
+    rows=items.map(p=>`<tr style="cursor:pointer" data-ps='${esc(JSON.stringify(p))}'>
+      <td><b>${esc(p.display_name)}</b></td>
+      <td><span class="badge ${p.status==='confirmed'?'b-ok':'b-warn'}">${p.status==='confirmed'?'已确认':'待确认'}</span></td>
+      <td>${p.accounts.map(a=>chantBadge(a.channel)+' <span class="mono dim">'+esc(a.account.slice(0,14))+'</span>').join(' ')}</td>
+      <td class="mono dim nowrap">${fmtTime(p.first_seen_ms||p.created_ms)}</td></tr>`).join('');
+  }
+
+  c.innerHTML = filterBar(page, state.params) + `
+    <div class="tablewrap">
+      <div class="tbl-head">
+        <span class="t">${PAGES[page].title}</span>
+        <span class="dim">共 ${fmtNum(total)} 条</span>
+        <span class="sp"></span>
+        ${canCreate(page)?`<button class="primary" id="btnNew">+ 新增</button>`:''}
+        ${pages>1?`<span class="dim">第 ${data.page} / ${pages} 页</span>`:''}
+      </div>
+      <div style="overflow-x:auto"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div>
+      ${pages>1?`<div class="pager">
+        <button ${data.page<=1?'disabled':''} data-pg="1">« 首页</button>
+        <button ${data.page<=1?'disabled':''} data-pg="${data.page-1}">‹ 上一页</button>
+        <span class="sp"></span>
+        <button ${data.page>=pages?'disabled':''} data-pg="${data.page+1}">下一页 ›</button>
+        <button ${data.page>=pages?'disabled':''} data-pg="${pages}">末页 »</button>
+      </div>`:''}
+    </div>`;
+
+  // 行点击 → 抽屉详情
+  c.querySelectorAll('[data-ev]').forEach(el=>el.onclick=()=>{
+    const e=JSON.parse(el.dataset.ev);
+    showDrawer('事件 #'+e.id, `<div class="editrow">
+        <label>摘要（会进提示词，改清楚点）</label>
+        <textarea id="edSummary">${esc(e.summary)}</textarea>
+      </div>
+      <div class="editrow">
+        <label>重要度 <span class="dim" id="edImpVal">${e.importance.toFixed(2)}</span></label>
+        <input type="range" id="edImp" min="0" max="1" step="0.05" value="${e.importance}"
+               oninput="document.getElementById('edImpVal').textContent=(+this.value).toFixed(2)"
+               style="padding:0;background:none;border:0">
+      </div>
+      <div class="editrow">
+        <label>类型</label>
+        <input id="edKind" value="${esc(e.kind)}">
+      </div>
+      <div class="sectitle">只读信息</div>
+      <div class="kv">
+      <div class="k">时间</div><div class="v mono">${fmtTime(e.at_ms)} <span class="dim">(${fmtAgo(e.at_ms)})</span></div>
+      <div class="k">渠道</div><div class="v">${chantBadge(e.channel)}</div>
+      <div class="k">类型</div><div class="v mono">${esc(e.kind)}</div>
+      <div class="k">范围</div><div class="v mono">${esc(e.scope)}</div>
+      <div class="k">重要度</div><div class="v">${impBar(e.importance)}</div>
+      ${e.person_id?`<div class="k">关联人</div><div class="v mono">${esc(e.person_id)}</div>`:''}
+      ${e.channel_day?`<div class="k">游戏日</div><div class="v mono">${esc(e.channel_day)}</div>`:''}
+      ${e.dedup_key?`<div class="k">幂等键</div><div class="v mono">${esc(e.dedup_key)}</div>`:''}
+    </div>`,
+    `<button class="primary" id="edSave">保存</button>
+     <button class="danger" id="edDel">删除</button>
+     <span class="sp"></span>
+     <span class="dim" style="font-size:11.5px;align-self:center">时间与渠道不可改</span>`);
+
+    $('edDel').onclick=()=>confirmDelete(`/v1/event/${e.id}`, '这条事件');
+
+    $('edSave').onclick=()=>{
+      apiToken();
+      savePatch(`/v1/event/${e.id}`, {
+        summary: $('edSummary').value,
+        importance: +$('edImp').value,
+        kind: $('edKind').value
+      });
+    };
+  });
+  c.querySelectorAll('[data-fact]').forEach(el=>el.onclick=()=>{
+    const f=JSON.parse(el.dataset.fact);
+    showDrawer('事实 · '+f.key, `<div class="editrow">
+        <label>键</label><input id="fdKey" value="${esc(f.key)}" disabled class="dim">
+      </div>
+      <div class="editrow">
+        <label>值</label><textarea id="fdValue">${esc(f.value)}</textarea>
+      </div>
+      <div class="editrow">
+        <label>重要度 <span class="dim" id="fdImpVal">${f.importance.toFixed(2)}</span></label>
+        <input type="range" id="fdImp" min="0" max="1" step="0.05" value="${f.importance}"
+               oninput="document.getElementById('fdImpVal').textContent=(+this.value).toFixed(2)"
+               style="padding:0;background:none;border:0">
+      </div>
+      <div class="editrow">
+        <label>层级（人写的不随时间衰减）</label>
+        <span class="seg" id="fdTier">
+          <button data-v="curated" class="${f.tier==='curated'?'on':''}">人写</button>
+          <button data-v="extracted" class="${f.tier==='extracted'?'on':''}">推断</button>
+        </span>
+      </div>
+      <div class="sectitle">只读信息</div>
+      <div class="kv">
+      <div class="k">层级</div><div class="v"><span class="badge b-${esc(f.tier)}">${esc(f.tier)}</span> ${f.tier==='curated'?'（人写的不衰减）':'（推断的会衰减）'}</div>
+      <div class="k">状态</div><div class="v">${esc(f.status)}</div>
+      <div class="k">置信度</div><div class="v">${f.confidence.toFixed(2)}</div>
+      <div class="k">回忆次数</div><div class="v">${f.recall_count} <span class="dim">（被检索命中就 +1）</span></div>
+      <div class="k">创建</div><div class="v mono">${fmtTime(f.created_ms)}</div>
+      <div class="k">更新</div><div class="v mono">${fmtTime(f.updated_ms)}</div>
+      ${f.expires_ms?`<div class="k">过期</div><div class="v mono">${fmtTime(f.expires_ms)}</div>`:''}
+    </div>`,
+    `<button class="primary" id="fdSave">保存</button>
+     <button class="danger" id="fdDel">删除</button>
+     <span class="sp"></span>
+     <span class="dim" style="font-size:11.5px;align-self:center">键不可改（改键等于换一条事实）</span>`);
+
+    $('fdDel').onclick=()=>confirmDelete(`/v1/fact/${encodeURIComponent(f.id)}`, '这条事实');
+
+    $('fdTier').querySelectorAll('button').forEach(b=>{
+      b.onclick=()=>{
+        $('fdTier').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+        b.classList.add('on');
+      };
+    });
+    $('fdSave').onclick=()=>{
+      apiToken();
+      const tierBtn=$('fdTier').querySelector('button.on');
+      savePatch(`/v1/fact/${encodeURIComponent(f.id)}`, {
+        value: $('fdValue').value,
+        importance: +$('fdImp').value,
+        tier: tierBtn ? tierBtn.dataset.v : undefined
+      });
+    };
+  });
+  c.querySelectorAll('[data-jr]').forEach(el=>el.onclick=()=>{
+    const j=JSON.parse(el.dataset.jr);
+    showDrawer('手帐 · '+j.type_, `<div class="editrow">
+        <label>摘要</label><textarea id="jrSummary">${esc(j.summary)}</textarea>
+      </div>
+      <div class="editrow">
+        <label>细节</label><textarea id="jrDetails">${esc(j.details||'')}</textarea>
+      </div>
+      <div class="editrow">
+        <label>重要度 <span class="dim" id="jrImpVal">${j.importance.toFixed(2)}</span></label>
+        <input type="range" id="jrImp" min="0" max="1" step="0.05" value="${j.importance}"
+               oninput="document.getElementById('jrImpVal').textContent=(+this.value).toFixed(2)"
+               style="padding:0;background:none;border:0">
+      </div>
+      <div class="sectitle">只读信息</div>
+      <div class="kv">
+      <div class="k">时间</div><div class="v mono">${fmtTime(j.at_ms)}</div>
+      <div class="k">类型</div><div class="v mono">${esc(j.type_)}</div>
+      <div class="k">来源</div><div class="v mono">${esc(j.source)}</div>
+      <div class="k">渠道</div><div class="v">${chantBadge(j.channel)}</div>
+      <div class="k">重要度</div><div class="v">${impBar(j.importance)}</div>
+      ${j.planning_day_id?`<div class="k">规划日</div><div class="v mono">${esc(j.planning_day_id)}</div>`:''}
+    </div>`,
+    `<button class="primary" id="jrSave">保存</button>
+     <button class="danger" id="jrDel">删除</button>`);
+
+    $('jrDel').onclick=()=>confirmDelete(`/v1/journal/${encodeURIComponent(j.id)}`, '这条手帐');
+
+    $('jrSave').onclick=()=>{
+      apiToken();
+      savePatch(`/v1/journal/${encodeURIComponent(j.id)}`, {
+        summary: $('jrSummary').value,
+        details: $('jrDetails').value,
+        importance: +$('jrImp').value
+      });
+    };
+  });
+  c.querySelectorAll('[data-dy]').forEach(el=>el.onclick=()=>{
+    const d=JSON.parse(el.dataset.dy);
+    showDrawer(d.title||'日记', `<div class="kv">
+      <div class="k">类型</div><div class="v">${esc(d.kind)}</div>
+      <div class="k">窗口</div><div class="v mono">${fmtTime(d.window_start_ms)} → ${fmtTime(d.window_end_ms)}</div>
+      <div class="k">模型</div><div class="v mono">${esc(d.model||'—')}</div>
+    </div><div class="sectitle">正文</div><pre class="body">${esc(d.body)}</pre>`,
+    `<button class="danger" id="dyDel">删除这篇日记</button>`);
+
+    $('dyDel').onclick=()=>confirmDelete(`/v1/diary/${encodeURIComponent(d.id)}`, '这篇日记');
+  });
+  c.querySelectorAll('[data-ps]').forEach(el=>el.onclick=()=>{
+    const p=JSON.parse(el.dataset.ps);
+    showDrawer('身份 · '+p.display_name, `
+      <div class="editrow">
+        <label>显示名</label>
+        <input id="psName" value="${esc(p.display_name)}">
+      </div>
+      <div class="editrow">
+        <label>状态</label>
+        <span class="seg" id="psStatus">
+          <button data-v="pending" class="${p.status==='pending'?'on':''}">待确认</button>
+          <button data-v="confirmed" class="${p.status==='confirmed'?'on':''}">已确认</button>
+        </span>
+        <span class="dim" style="font-size:11px;margin-top:4px">
+          待确认 = 还没跟其他渠道的账号建立关联，记忆不跨渠道合并
+        </span>
+      </div>
+      <div class="editrow">
+        <label>备注</label>
+        <input id="psNote" value="${esc(p.note||'')}" placeholder="可空">
+      </div>
+      <div class="sectitle">只读</div>
+      <div class="kv">
+        <div class="k">ID</div><div class="v mono">${esc(p.person_id)}</div>
+        <div class="k">创建</div><div class="v mono">${fmtTime(p.created_ms)}</div>
+      </div>
+
+      <div class="sectitle">渠道账号 <span class="hint">同一个人在不同渠道的 id</span></div>
+      <div class="tablewrap"><table><thead><tr><th>渠道</th><th>账号</th><th>该渠道名字</th><th>最后出现</th></tr></thead>
+      <tbody>${p.accounts.map(a=>`<tr><td>${chantBadge(a.channel)}</td>
+        <td class="mono">${esc(a.account)}</td><td>${esc(a.seen_name||'—')}</td>
+        <td class="mono dim">${fmtTime(a.last_seen_ms)}</td></tr>`).join('')||'<tr><td colspan=4 class="dim">还没有绑任何渠道账号</td></tr>'}</tbody></table></div>
+
+      <div class="sectitle">绑一个渠道账号</div>
+      <div class="editrow">
+        <label>渠道</label>
+        <span class="seg" id="bindCh">
+          <button data-v="mc" class="on">mc</button>
+          <button data-v="qq">qq</button>
+          <button data-v="live">live</button>
+        </span>
+      </div>
+      <div class="editrow">
+        <label>账号（MC 是 UUID、QQ 是号、直播是 uid）</label>
+        <input id="bindAcct" placeholder="例如 12345678 或 uuid">
+      </div>
+      <div class="editrow">
+        <label>该渠道上的名字（可空）</label>
+        <input id="bindName">
+      </div>`,
+    `<button class="primary" id="psSave">保存</button>
+     <button id="psBind">绑定账号</button>
+     <span class="sp"></span>`);
+
+    $('psStatus').querySelectorAll('button').forEach(b=>{
+      b.onclick=()=>{$('psStatus').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+    });
+    $('bindCh').querySelectorAll('button').forEach(b=>{
+      b.onclick=()=>{$('bindCh').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+    });
+
+    $('psSave').onclick=async()=>{
+      const st=$('psStatus').querySelector('button.on');
+      try{
+        const r=await fetch(`/api/admin/person/${encodeURIComponent(p.person_id)}`,{
+          method:'PATCH',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({
+            display_name: $('psName').value,
+            status: st ? st.dataset.v : undefined,
+            note: $('psNote').value
+          })});
+        if(!r.ok){ let m=r.status+''; try{const j=await r.json(); if(j.error)m=j.error;}catch(_){} toast('保存失败：'+m,true); return; }
+        toast('已保存'); closeDrawer(); render();
+      }catch(e){ toast('保存失败：'+e.message,true); }
+    };
+
+    $('psBind').onclick=async()=>{
+      const ch=$('bindCh').querySelector('button.on');
+      const acct=$('bindAcct').value.trim();
+      if(!acct){ toast('账号不能为空',true); return; }
+      try{
+        const r=await fetch(`/api/admin/person/${encodeURIComponent(p.person_id)}/account`,{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({channel: ch?ch.dataset.v:'mc', account: acct, seen_name: $('bindName').value||null})});
+        if(!r.ok){ let m=r.status+''; try{const j=await r.json(); if(j.error)m=j.error;}catch(_){} toast('绑定失败：'+m,true); return; }
+        toast('已绑定'); closeDrawer(); render();
+      }catch(e){ toast('绑定失败：'+e.message,true); }
+    };
+  });
+
+  const bn=$('btnNew');
+  if(bn) bn.onclick=()=>openCreate(page);
+
+  c.querySelectorAll('[data-pg]').forEach(el=>el.onclick=()=>{
+    state.params.page = +el.dataset.pg;
+    render();
+  });
+  bindFilters(page);
+}
+
+/// 哪些页面支持新增。事件/事实走 /v1 的 POST，手帐/日记也补了 POST。
+function canCreate(page){
+  return ['events','facts','journal','diaries'].includes(page);
+}
+
+const CREATE_FORMS = {
+  events: ()=>({
+    title:'新增事件',
+    fields:[
+      {k:'channel', l:'渠道', seg:['mc','qq','live','system'], v:'mc'},
+      {k:'kind', l:'类型', v:'manual', hint:'如 task_done / attacked / discovery'},
+      {k:'summary', l:'摘要', text:true, req:true, hint:'会进提示词'},
+      {k:'importance', l:'重要度', range:true, v:0.5},
+      {k:'dedup_key', l:'幂等键（可空）', v:'', hint:'同一次事件重放要用同一个键'},
+    ],
+    build:(g)=>g,
+    url:'/v1/event',
+  }),
+  facts: ()=>({
+    title:'新增事实',
+    fields:[
+      {k:'channel', l:'渠道', seg:['mc','qq','live'], v:'mc'},
+      {k:'key', l:'键', v:'', req:true, hint:'同一个 key 会覆盖旧版本（旧的保留为历史）'},
+      {k:'value', l:'值', text:true, req:true},
+      {k:'tier', l:'层级', seg:['curated','extracted'], v:'extracted', hint:'人写的不随时间衰减'},
+      {k:'importance', l:'重要度', range:true, v:0.5},
+    ],
+    build:(g)=>g,
+    url:'/v1/fact',
+  }),
+  journal: ()=>({
+    title:'新增手帐',
+    fields:[
+      {k:'type_', l:'类型', v:'other', hint:'task_done / task_failed / discovery / preference…'},
+      {k:'channel', l:'渠道', seg:['mc','qq','live'], v:'mc'},
+      {k:'summary', l:'摘要', text:true, req:true},
+      {k:'details', l:'细节', text:true},
+      {k:'importance', l:'重要度', range:true, v:0.5},
+    ],
+    build:(g)=>({...g, type: g.type_ ? g.type_ : 'other'}),
+    url:'/v1/journal',
+  }),
+  diaries: ()=>({
+    title:'新增日记',
+    fields:[
+      {k:'kind', l:'类型', seg:['day','week','month'], v:'day'},
+      {k:'title', l:'标题', v:''},
+      {k:'body', l:'正文', text:true, req:true},
+    ],
+    build:(g)=>g,
+    url:'/v1/diary',
+  }),
+};
+
+function openCreate(page){
+  const form = CREATE_FORMS[page]();
+  const html = form.fields.map(f=>{
+    if(f.seg) return `<div class="editrow"><label>${f.l}</label>
+      <span class="seg" data-newseg="${f.k}">
+        ${f.seg.map(o=>`<button data-v="${o}" class="${o===f.v?'on':''}">${o}</button>`).join('')}
+      </span></div>`;
+    if(f.range) return `<div class="editrow"><label>${f.l} <span class="dim" id="new_${f.k}_v">${f.v.toFixed(2)}</span></label>
+      <input type="range" id="new_${f.k}" min="0" max="1" step="0.05" value="${f.v}"
+        oninput="document.getElementById('new_${f.k}_v').textContent=(+this.value).toFixed(2)"
+        style="padding:0;background:none;border:0"></div>`;
+    if(f.text) return `<div class="editrow"><label>${f.l}${f.hint?` <span class="dim">${f.hint}</span>`:''}</label>
+      <textarea id="new_${f.k}"></textarea></div>`;
+    return `<div class="editrow"><label>${f.l}${f.hint?` <span class="dim">${f.hint}</span>`:''}</label>
+      <input id="new_${f.k}" value="${esc(f.v||'')}"></div>`;
+  }).join('');
+
+  showDrawer(form.title, html,
+    `<button class="primary" id="newSave">创建</button><span class="sp"></span>
+     <span class="dim" style="font-size:11.5px;align-self:center">需要 API token</span>`);
+
+  document.querySelectorAll('[data-newseg]').forEach(box=>{
+    box.querySelectorAll('button').forEach(b=>{
+      b.onclick=()=>{box.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+    });
+  });
+
+  $('newSave').onclick=async()=>{
+    apiToken();
+    const g={};
+    for(const f of form.fields){
+      if(f.seg){
+        const box=document.querySelector(`[data-newseg="${f.k}"]`);
+        const on=box && box.querySelector('button.on');
+        g[f.k]=on?on.dataset.v:f.v;
+      } else if(f.range){
+        g[f.k]=+($('new_'+f.k)?.value||0);
+      } else {
+        const el=$('new_'+f.k);
+        if(el) g[f.k]=el.value;
+      }
+    }
+    // 手帐的 type_ 在请求体里叫 type
+    const body=form.build(g);
+    try{
+      const r=await fetch(form.url,{method:'POST',
+        headers:{'Content-Type':'application/json','X-API-Token':localStorage.getItem('bw_api_token')||''},
+        body:JSON.stringify(body)});
+      if(r.status===401){ toast('需要 API token', true); return; }
+      if(!r.ok){
+        let m=r.status+'';
+        try{const j=await r.json(); if(j.error)m=j.error;}catch(_){}
+        toast('创建失败：'+m,true); return;
+      }
+      toast('已创建');
+      closeDrawer(); render();
+    }catch(e){ toast('创建失败：'+e.message,true); }
+  };
+}
+
+function hasFilter(p){
+  return ['q','channel','kind','status','tier'].some(k=>p[k]);
+}
+
+function filterBar(page, p){
+  const f=[];
+  if(['events','journal','facts','messages'].includes(page)){
+    f.push(`<input type="search" id="fQ" placeholder="搜索摘要/键值…" value="${esc(p.q||'')}">`);
+  }
+  // 下拉一律换成单选分段控件：一眼看全选项，少一次点击。
+  const seg=(id,opts,cur)=>`<span class="seg" data-seg="${id}">
+    ${opts.map(([v,t])=>`<button data-v="${v}" class="${(cur||'')===v?'on':''}">${t}</button>`).join('')}
+  </span>`;
+  if(page==='events'){
+    f.push(seg('fChannel',[['','全部'],['mc','MC'],['qq','QQ'],['live','直播'],['system','系统']],p.channel));
+    f.push(seg('fForgot',[['','仅有效'],['1','含已遗忘']],p.forgotten));
+  }
+  if(page==='facts'){
+    f.push(seg('fTier',[['','全部'],['curated','人写'],['extracted','推断']],p.tier));
+    f.push(seg('fForgot',[['','当前有效'],['1','历史版本']],p.forgotten));
+  }
+  if(page==='diaries'){
+    f.push(seg('fKind',[['','全部'],['day','日'],['week','周'],['month','月']],p.kind));
+  }
+  if(page==='messages'){
+    f.push(seg('fChannel',[['','全部'],['qq','QQ'],['live','直播']],p.channel));
+  }
+  f.push(`<button class="primary" id="fGo">筛选</button>`);
+  if(hasFilter(p)||p.forgotten) f.push(`<button id="fClear">清空</button>`);
+  return `<div style="display:flex;gap:9px;margin-bottom:14px;flex-wrap:wrap;align-items:center">${f.join('')}</div>`;
+}
+
+/// 单选分段的当前值。存在 DOM 上，点一下即生效并立刻重查。
+function segValue(id){
+  const box=document.querySelector(`[data-seg="${id}"]`);
+  if(!box) return '';
+  const on=box.querySelector('button.on');
+  return on ? on.dataset.v : '';
+}
+
+function bindFilters(page){
+  // 分段控件：点击即切换，并立刻筛选（不用再点「筛选」按钮）
+  document.querySelectorAll('[data-seg]').forEach(box=>{
+    box.querySelectorAll('button').forEach(b=>{
+      b.onclick=()=>{
+        box.querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+        b.classList.add('on');
+        applyFilters();
+      };
+    });
+  });
+
+  const go=$('fGo');
+  if(go) go.onclick=applyFilters;
+
+  const q=$('fQ');
+  if(q) q.onkeydown = ev => { if(ev.key==='Enter') applyFilters(); };
+
+  const cl=$('fClear');
+  if(cl) cl.onclick=()=>{ state.params={}; render(); };
+}
+
+function applyFilters(){
+  const np={};
+  const q=$('fQ');
+  if(q && q.value.trim()) np.q=q.value.trim();
+  const ch=segValue('fChannel'); if(ch) np.channel=ch;
+  const fg=segValue('fForgot');  if(fg) np.forgotten=fg;
+  const ti=segValue('fTier');    if(ti) np.tier=ti;
+  const kd=segValue('fKind');    if(kd) np.kind=kd;
+  state.params=np;
+  render();
+}
+
+// ---------- 规划
+const PLAN_STATE = {
+  todo:        {label:'待做',   cls:'b-extracted', icon:'·'},
+  done:        {label:'完成',   cls:'b-ok',        icon:'✅'},
+  partly_done: {label:'做一半', cls:'b-warn',      icon:'◐'},
+  deferred:    {label:'暂缓',   cls:'b-warn',      icon:'⏸'},
+  dropped:     {label:'放弃',   cls:'b-err',       icon:'✕'},
+};
+const J_ICON = {
+  task_done:'✅', review:'📝', plan:'📋', task_partial:'◐', task_failed:'❌',
+  task_interrupted:'✂', task_deferred:'⏸', task_recovered:'↻', player_together:'👤',
+  promise:'🤝', preference:'💭', discovery:'✨', other:'·',
+};
+
+async function renderPlans(c){
+  // 单主体：只有一份规划、一条时间线，不需要再区分是谁的。
+  const [tl, plans] = await Promise.all([
+    api('/api/admin/timeline?days=12'),
+    api('/api/admin/plans?size=60'),
+  ]);
+
+  const days = tl.items || [];
+  const cur = days.find(d => d.has_plan) || days[0];
+  const planById = {};
+  (plans.items || []).forEach(p => { planById[p.planning_day_id] = p; });
+
+  // ---------- HUD ----------
+  const totalItems = days.reduce((a, d) => a + d.total_items, 0);
+  const doneItems = days.reduce((a, d) => a + d.done_items, 0);
+  const deferredItems = days.reduce((a, d) => a + d.deferred_items, 0);
+  const idleDays = days.filter(d => d.has_plan && !d.has_activity).length;
+  const pct = totalItems ? Math.round(doneItems / totalItems * 100) : 0;
+
+  const hud = `
+    <div class="hud-row">
+      <div class="hud-cell">
+        <div class="hud-k">当前周期</div>
+        <div class="hud-v mono">${esc(cur ? cur.cycle : '—')}</div>
+        <div class="hud-m">${cur && cur.plan_summary ? esc(cur.plan_summary.slice(0, 28)) + '…' : '没有计划'}</div>
+      </div>
+      <div class="hud-cell">
+        <div class="hud-k">近 ${days.length} 个周期完成度</div>
+        <div class="hud-v">${doneItems}<span class="dim" style="font-size:15px">/${totalItems}</span>
+          <span class="dim" style="font-size:13px;margin-left:6px">${pct}%</span></div>
+        <div class="hud-bar"><i style="width:${pct}%"></i></div>
+      </div>
+      <div class="hud-cell">
+        <div class="hud-k">暂缓</div>
+        <div class="hud-v">${deferredItems}</div>
+        <div class="hud-m">不是失败，条件满足会自动打勾</div>
+      </div>
+      <div class="hud-cell ${idleDays ? 'warn' : ''}">
+        <div class="hud-k">空转周期</div>
+        <div class="hud-v" style="color:${idleDays ? 'var(--warn)' : 'var(--fg)'}">${idleDays}</div>
+        <div class="hud-m">有计划但没有任何执行记录</div>
+      </div>
+    </div>`;
+
+  // ---------- 当前周期的计划（展开）----------
+  let todayBlock = '';
+  if (cur && cur.plan_id) {
+    const pid = cur.plan_id;
+    let detail = null;
+    try { detail = await api('/api/admin/plan/' + encodeURIComponent(pid)); } catch (_) {}
+
+    const items = (detail && detail.items) || [];
+    const cards = items.map(it => {
+      const st = PLAN_STATE[it.state] || {label: it.state, cls: 'b-extracted', icon: '·'};
+      return `<div class="pitem st-${esc(it.state)}">
+        <div class="pitem-head">
+          <span class="pnum">${it.ord + 1}</span>
+          <span class="ptitle">${esc(it.title)}</span>
+          ${it.kind ? `<span class="badge b-extracted">${esc(it.kind)}</span>` : ''}
+          ${it.priority != null ? `<span class="dim mono" style="font-size:11px">P${it.priority}</span>` : ''}
+          <span class="sp"></span>
+          ${it.task_type ? `<span class="mono dim" style="font-size:11px">${esc(it.task_type)}</span>` : ''}
+          <span class="badge ${st.cls}">${st.icon} ${st.label}</span>
+        </div>
+        ${it.reason ? `<div class="pwhy"><b>为什么</b> ${esc(it.reason)}</div>` : ''}
+        ${it.success ? `<div class="pwhy"><b>算做完</b> ${esc(it.success)}</div>` : ''}
+        ${it.outcome ? `<div class="pwhy out"><b>结果</b> ${esc(it.outcome)}</div>` : ''}
+        ${it.fallback ? `<div class="pwhy dim"><b>做不成</b> ${esc(it.fallback)}</div>` : ''}
+      </div>`;
+    }).join('');
+
+    todayBlock = `
+      <div class="sectitle">当前周期 <span class="hint mono">${esc(cur.cycle)}</span>
+        <span class="hint">${cur.done_items}/${cur.total_items} 完成</span></div>
+      ${cur.plan_summary ? `<div class="psummary">${esc(cur.plan_summary)}</div>` : ''}
+      <div class="pcards">${cards || '<div class="empty">这份计划没有条目</div>'}</div>`;
+  }
+
+  // ---------- 它的一天：时间线 ----------
+  const dayBlocks = days.map(d => {
+    const empty = !d.has_activity;
+    const rows = d.entries.map(e => `
+      <div class="tnode">
+        <span class="tic">${J_ICON[e.kind] || '·'}</span>
+        <span class="ttx">
+          <span class="t1">${esc(e.summary)}</span>
+          ${e.details && e.details !== e.summary
+            ? `<span class="t2">${esc(e.details)}</span>` : ''}
+        </span>
+        <span class="ttm mono">${fmtTime(e.at_ms).slice(11, 16)}</span>
+      </div>`).join('');
+
+    const badge = d.has_plan
+      ? `<span class="badge ${d.done_items >= d.total_items && d.total_items > 0 ? 'b-ok' : (d.has_activity ? 'b-warn' : 'b-err')}">${d.done_items}/${d.total_items}</span>`
+      : '';
+
+    return `<div class="tday ${empty ? 'gap' : ''}">
+      <div class="tday-head">
+        <span class="tcycle mono">${esc(d.cycle)}</span>
+        <span class="tsum" title="${esc(d.plan_summary || '')}">${esc(d.plan_summary || '<span class="dim">（这天没有计划）</span>')}</span>
+        ${badge}
+        <span class="sp"></span>
+        <span class="dim mono" style="font-size:11px">${fmtTime(d.anchor_ms).slice(5, 10)}</span>
+      </div>
+      ${empty
+        ? `<div class="tgap">⚠ 有计划但没有任何执行记录 —— 这天可能空转了</div>`
+        : rows}
+    </div>`;
+  }).join('');
+
+  c.innerHTML = `
+    <p class="dim" style="font-size:12.5px;margin:0 0 14px">
+      规划日是<b>游戏日</b>（<code>g&lt;N&gt;</code>），只作标签；排序用<b>现实时间</b>——
+      游戏时钟在停服期间不走，拿它排序会把「最近一份」判错。
+    </p>
+    ${hud}
+    ${todayBlock}
+    <div class="sectitle">它的一天 <span class="hint">计划与执行在同一条脊线上，空档会显出来</span></div>
+    <div class="timeline">${dayBlocks || '<div class="empty">还没有任何记录</div>'}</div>`;
+}
+
+// ---------- 情绪
+async function renderMood(c){
+  const data = await api('/api/admin/moods');
+  if(!data.items.length){
+    c.innerHTML='<div class="empty">还没有情绪记录。<br><span class="dim">写入带有情绪含义的事件（task_done / attacked / discovery…）时会自动推动。</span></div>';
+    return;
+  }
+
+  // 把「最近的推动来源」按事件拉出来——只显示"因为：挨了打"
+  // 不够，要能看出**具体是哪件事**。
+  let recent = {};
+  try{
+    const ev = await api('/api/admin/events?size=40');
+    (ev.items||[]).forEach(e=>{
+      (recent['me'] = recent['me'] || []).push(e);
+    });
+  }catch(_){}
+
+  c.innerHTML = `
+    <p class="dim" style="font-size:12.5px;margin:0 0 16px">
+      PAD 三维模型：<b>愉悦度</b>（好受↔难受）、<b>唤醒度</b>（激动↔平静）、<b>支配感</b>（掌控↔被支配）。
+      三者组合成情绪标签。有情绪时会在提示词里加一行「心情:…」；<b>平静时不占 token</b>。
+    </p>
+    ${data.items.map(m=>{
+      const evs = (recent['me']||[]).slice(0,5);
+      const tr = v => {
+        const pct=((v+1)/2*100).toFixed(1);
+        return `<div class="axis">
+          <div class="axisbar"><i style="left:${v<0?'auto':'50%'};right:${v<0?'50%':'auto'};
+            width:${Math.abs(v)*50}%;background:${v<0?'var(--err)':'var(--ok)'}"></i>
+            <span class="mid"></span></div>
+        </div>`;
+      };
+      return `<div class="card" style="cursor:default;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:13px;margin-bottom:16px">
+          <span style="font-size:30px;line-height:1">${moodEmoji(m.label)}</span>
+          <div style="flex:1">
+            <div style="font-size:18px;font-weight:600">${esc(m.label)}</div>
+            <div class="dim" style="font-size:11.5px">更新于 ${fmtAgo(m.updated_ms)}</div>
+          </div>
+          ${m.reason?`<span class="badge b-warn">${esc(m.reason)}</span>`:''}
+        </div>
+
+        ${[['愉悦度','valence',m.valence,'难受','好受'],
+           ['唤醒度','arousal',m.arousal,'平静','激动'],
+           ['支配感','dominance',m.dominance,'被动','主动']]
+          .map(([name,key,v,lo,hi])=>`
+          <div class="mrow">
+            <span class="mk">${name}</span>
+            <span class="mlo">${lo}</span>
+            <div class="mbar">
+              <span class="mid"></span>
+              <i style="left:${v<0?'auto':'50%'};right:${v<0?'50%':'auto'};
+                 width:${Math.abs(v)*50}%;background:${v<0?'var(--err)':'var(--ok)'}"></i>
+            </div>
+            <span class="mhi">${hi}</span>
+            <span class="mv mono">${v.toFixed(2)}</span>
+          </div>`).join('')}
+
+        ${evs.length?`
+        <div class="sectitle" style="margin:18px 0 9px">最近的经历 <span class="hint">情绪就是被这些推动的</span></div>
+        <div class="evlist">
+          ${evs.map(e=>{
+            const d = typeof deltaFor==='function' ? deltaFor(e.kind) : null;
+            return `<div class="evitem">
+              <span class="mono dim" style="width:96px;flex:none">${fmtTime(e.at_ms).slice(5,16)}</span>
+              ${chantBadge(e.channel)}
+              <span class="mono dim" style="width:88px;flex:none">${esc(e.kind)}</span>
+              <span style="flex:1">${esc(e.summary)}</span>
+              ${d?`<span class="badge ${d.v>0?'b-ok':d.v<0?'b-err':'b-extracted'}"
+                      title="${esc(d.why)}">${d.v>0?'+':''}${d.v.toFixed(2)}</span>`
+                  :'<span class="dim" style="font-size:11px">不推动</span>'}
+            </div>`;
+          }).join('')}
+        </div>`:'<p class="dim" style="font-size:12px;margin-top:14px">没有近期事件</p>'}
+      </div>`;
+    }).join('')}
+    <p class="dim" style="font-size:12px;margin-top:6px">
+      半衰期 30 分钟：没被推动时自然衰减回平静。这是「一次挨打影响这一会儿，但不记仇三天」的实现方式。
+    </p>`;
+}
+
+/// 哪类事件推动情绪、推多少。必须与后端 `affect::delta_for` 保持一致。
+function deltaFor(kind){
+  const M = {
+    'task.done':['干完了一件活',0.25], 'task_done':['干完了一件活',0.25],
+    'player.together':['有人陪着',0.30], 'player_together':['有人陪着',0.30],
+    'gift.received':['收到了东西',0.35], 'gift':['收到了东西',0.35],
+    'discovery':['发现了新东西',0.20], 'promise.kept':['守住了承诺',0.30],
+    'promise_kept':['守住了承诺',0.30],
+    'attacked':['挨了打',-0.35], 'damage':['挨了打',-0.35],
+    'task.failed':['活没干成',-0.30], 'task_failed':['活没干成',-0.30],
+    'bag.taken':['包被拿走了',-0.40], 'stolen':['包被拿走了',-0.40],
+    'hungry':['饿了',-0.20], 'death':['死了',-0.50],
+    'promise.broken':['没守承诺',-0.35], 'promise_broken':['没守承诺',-0.35],
+    'player.talked':['有人说话',0.05], 'message':['有人说话',0.05],
+  };
+  const e = M[kind];
+  return e ? {why:e[0], v:e[1]} : null;
+}
+
+function moodEmoji(label){
+  return {'雀跃':'😆','满足':'😊','愉快':'🙂','平静':'😐','不快':'😕',
+          '恼火':'😠','低落':'😢','警觉':'😯','倦怠':'😑'}[label] || '😐';
+}
+
+// ---------- 自我认知
+async function renderSelf(c){
+  const d = await api('/api/admin/self');
+  if(!d.items.length){
+    c.innerHTML=`<div class="empty">
+      还没有自我认知。<br>
+      <span class="dim">这一块是它自己写的「我是谁」，通常每晚跟随日记改写一次。</span><br><br>
+      <span class="dim" style="font-size:12px">与「人设」的区别：人设是操作者写的剧本（应该成为谁），这里是它自己写的（现在觉得自己是谁）。</span>
+    </div>`;
+    return;
+  }
+  const cur = d.items.filter(x=>x.current);
+  const old = d.items.filter(x=>!x.current);
+  c.innerHTML = `
+    ${cur.map(n=>`<div class="card" style="cursor:default;margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        <span style="font-size:22px">🪞</span>
+        <div>
+          <div style="font-size:15px;font-weight:600">现在的自述</div>
+          <div class="dim" style="font-size:11.5px">写于 ${fmtTime(n.created_ms)} · 模型 ${esc(n.model||'—')}</div>
+        </div>
+      </div>
+      <pre class="body" style="background:transparent;border:0;padding:0">${esc(n.body)}</pre>
+    </div>`).join('')}
+    ${old.length?`
+    <div class="sectitle">历史版本 <span class="hint">它以前觉得自己是谁</span></div>
+    <div class="tablewrap"><table><thead><tr>
+      <th>写于</th><th>被取代</th><th>摘要</th></tr></thead>
+      <tbody>${old.map(n=>`<tr style="cursor:pointer" data-sn='${esc(JSON.stringify(n))}'>
+        <td class="mono nowrap">${fmtTime(n.created_ms)}</td>
+        <td class="mono dim nowrap">${fmtTime(n.superseded_ms)}</td>
+        <td class="dim">${esc(n.body.slice(0,60))}…</td></tr>`).join('')}</tbody>
+    </table></div>`:''}`;
+
+  c.querySelectorAll('[data-sn]').forEach(el=>el.onclick=()=>{
+    const n=JSON.parse(el.dataset.sn);
+    showDrawer('历史自述 · '+fmtTime(n.created_ms),
+      `<div class="kv"><div class="k">模型</div><div class="v mono">${esc(n.model||'—')}</div>
+       <div class="k">写于</div><div class="v mono">${fmtTime(n.created_ms)}</div>
+       <div class="k">被取代</div><div class="v mono">${fmtTime(n.superseded_ms)}</div></div>
+       <div class="sectitle">正文</div><pre class="body">${esc(n.body)}</pre>`);
+  });
+}
+
+// ---------- 关系
+//
+// 这一页不是报表：熟悉/信任/亲密度本来就允许人按剧情调（比如刚认识就
+// 设定成熟识），所以带编辑。另一块是「各场景里的称呼」—— 同一个人
+// 在 MC 里、QQ 私聊里、QQ 群里、直播间里被叫的名字不一样，
+// 而 `person_account` 一个渠道只能存一个名字。留空就按渠道账号/群消息自动推导。
+const SCENE_META = [['mc','MC 里'],['qq','QQ 私聊'],['qq_group','QQ 群'],['live','直播间']];
+
+/// 该身份在某个渠道上的名字（用于新建关系时的提示）。
+function acctName(p, ch){
+  const a = (p.accounts||[]).find(x=>x.channel===ch);
+  return a && a.seen_name ? a.seen_name : '';
+}
+
+function sceneLine(scenes){
+  const on = (scenes||[]).filter(s=>s.name);
+  if(!on.length) return '<span class="dim">还没有称呼</span>';
+  return on.map(s=>{
+    const cls = s.scene==='qq_group' ? 'qq' : s.scene;
+    return `<span class="badge b-${esc(cls)}">${esc(s.label)}</span> <span style="font-size:12.5px">${esc(s.name)}</span>`;
+  }).join('<span class="dim"> · </span>');
+}
+
+async function renderRelations(c){
+  const d = await api('/api/admin/relations');
+  const items = d.items || [];
+  if(!items.length){
+    c.innerHTML = `<div class="tablewrap">
+      <div class="tbl-head"><span class="t">关系</span><span class="sp"></span>
+        <button class="primary" id="relNew">+ 新建关系</button></div>
+      <div class="empty">还没有关系记录。<br><span class="dim">玩家进服、聊天、一起做事会积累熟悉度与亲密度；也可以手动新建。</span></div>
+    </div>`;
+    $('relNew').onclick=()=>openNewRelation();
+    return;
+  }
+  c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
+    亲密度决定它怎么对待这个人（陌生→认识→熟识→亲近→交心）。点一行可以改数值、备注和各场景里的称呼。
+  </p>
+  <div class="tablewrap">
+    <div class="tbl-head"><span class="t">关系</span>
+      <span class="dim">共 ${fmtNum(items.length)} 人</span><span class="sp"></span>
+      <button class="primary" id="relNew">+ 新建关系</button></div>
+    <div style="overflow-x:auto"><table><thead><tr>
+      <th>人</th><th>各场景里的称呼</th><th>阶段</th><th style="width:150px">亲密度</th>
+      <th class="num">熟悉</th><th class="num">信任</th><th>最近</th></tr></thead>
+    <tbody>${items.map(r=>`<tr style="cursor:pointer" data-rel='${esc(JSON.stringify(r))}'>
+      <td><b>${esc(r.display_name||r.person_id)}</b>${r.note?`<div class="dim" style="font-size:11.5px">${esc(r.note)}</div>`:''}</td>
+      <td>${sceneLine(r.scenes)}</td>
+      <td><span class="badge b-ok">${esc(r.stage)}</span></td>
+      <td>${impBar(r.closeness/100)}</td>
+      <td class="num">${r.familiarity}</td>
+      <td class="num">${r.trust}</td>
+      <td class="mono dim nowrap">${fmtAgo(r.last_met_ms)}</td></tr>`).join('')}</tbody>
+    </table></div>
+  </div>`;
+
+  c.querySelectorAll('[data-rel]').forEach(el=>{
+    el.onclick=()=>openRelationEdit(JSON.parse(el.dataset.rel));
+  });
+  $('relNew').onclick=()=>openNewRelation();
+}
+
+/// 新建关系：可以挂在已有身份上，也可以顺手建一个新身份。
+async function openNewRelation(){
+  let persons=[];
+  const taken=new Set();
+  try{ const d=await api('/api/admin/persons?size=200'); persons=d.items||[]; }catch(e){}
+  try{ const d=await api('/api/admin/relations'); (d.items||[]).forEach(r=>taken.add(r.person_id)); }catch(e){}
+
+  const chips = persons.map(p=>{
+    const dis = taken.has(p.person_id);
+    return `<button class="chip${dis?' dis':''}" data-pid="${esc(p.person_id)}"
+      data-mc="${esc(acctName(p,'mc'))}" data-qq="${esc(acctName(p,'qq'))}"
+      data-live="${esc(acctName(p,'live'))}" ${dis?'disabled':''}>${esc(p.display_name)}</button>`;
+  }).join('');
+
+  showDrawer('新建关系', `
+    <div class="editrow"><label>关联谁</label>
+      <span class="seg" id="relMode">
+        <button data-v="pick" class="on">选已有身份</button>
+        <button data-v="new">新建身份</button>
+      </span>
+    </div>
+    <div id="relPickBox">
+      ${persons.length?`<div class="chips" id="relChips">${chips}</div>
+        <div class="dim" style="font-size:11.5px;margin-top:6px">灰掉的已经有关系记录，直接去编辑那一条。</div>`
+        :`<div class="dim" style="font-size:12px">还没有任何身份，改用「新建身份」。</div>`}
+    </div>
+    <div id="relNewBox" style="display:none">
+      <div class="editrow"><label>显示名</label><input id="relNewName" placeholder="例如 小明"></div>
+    </div>
+    <div class="sectitle">关系数值 <span class="hint">0–100；20=认识 40=熟识 70=亲近 90=交心</span></div>
+    <div class="editrow"><label>亲密度</label><input type="number" id="relClo" min="0" max="100" value="0"></div>
+    <div class="editrow"><label>熟悉</label><input type="number" id="relFam" min="0" max="100" value="0"></div>
+    <div class="editrow"><label>信任</label><input type="number" id="relTru" min="0" max="100" value="0"></div>
+    <div class="editrow"><label>备注</label><input id="relNote" placeholder="可空，例如「一起盖过房」"></div>
+    <div class="sectitle">各场景里的称呼 <span class="hint">留空 = 按渠道账号/群消息自动显示</span></div>
+    ${SCENE_META.map(([k,l])=>`<div class="editrow"><label>${l}</label>
+      <input id="relSc_${k}" placeholder="留空 = 自动"></div>`).join('')}`,
+    `<button class="primary" id="relCreate">创建</button><span class="sp"></span>
+     <span class="dim" style="font-size:11.5px;align-self:center">建完也能随时改</span>`);
+
+  $('relMode').querySelectorAll('button').forEach(b=>{
+    b.onclick=()=>{
+      $('relMode').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      const pick = b.dataset.v==='pick';
+      $('relPickBox').style.display = pick ? '' : 'none';
+      $('relNewBox').style.display = pick ? 'none' : '';
+    };
+  });
+
+  let pid=null;
+  const chipsBox=$('relChips');
+  if(chipsBox){
+    chipsBox.querySelectorAll('.chip:not(.dis)').forEach(chip=>{
+      chip.onclick=()=>{
+        chipsBox.querySelectorAll('.chip').forEach(x=>x.classList.remove('on'));
+        chip.classList.add('on');
+        pid=chip.dataset.pid;
+        // 把该身份在各渠道上的名字写进 placeholder：
+        // 只是提示「自动值长什么样」，不会替人做主填成人工值。
+        [['relSc_mc','mc'],['relSc_qq','qq'],['relSc_live','live']].forEach(([id,ch])=>{
+          const el=$(id);
+          if(el) el.placeholder = chip.dataset[ch] ? `自动：${chip.dataset[ch]}` : '留空 = 自动';
+        });
+      };
+    });
+  }
+
+  $('relCreate').onclick=async()=>{
+    const mode=$('relMode').querySelector('button.on').dataset.v;
+    const scenes={};
+    SCENE_META.forEach(([k])=>{ const el=$('relSc_'+k); scenes[k]= el ? el.value : ''; });
+    const body={
+      familiarity:+($('relFam').value||0),
+      trust:+($('relTru').value||0),
+      closeness:+($('relClo').value||0),
+      note:$('relNote').value,
+      scenes
+    };
+    if(mode==='pick'){
+      if(!pid){ toast('先点选一个身份', true); return; }
+      body.person_id=pid;
+    }else{
+      const name=$('relNewName').value.trim();
+      if(!name){ toast('显示名不能为空', true); return; }
+      body.display_name=name;
+    }
+    try{
+      await apiDo('POST','/api/admin/relations',body);
+      toast('已新建关系'); closeDrawer(); render();
+    }catch(e){ toast('新建失败：'+e.message, true); }
+  };
+}
+
+/// 编辑一条关系：数值、备注、各场景称呼。
+function openRelationEdit(r){
+  const meta = (r.scenes && r.scenes.length) ? r.scenes
+    : SCENE_META.map(([k,l])=>({scene:k,label:l,name:null,source:'none',hint:null}));
+
+  showDrawer('关系 · '+(r.display_name||r.person_id), `
+    <div class="editrow"><label>显示名 <span class="dim">（改这里等于改身份页的显示名）</span></label>
+      <input id="relName" value="${esc(r.display_name||'')}"></div>
+    <div class="editrow"><label>备注</label>
+      <input id="relNote" value="${esc(r.note||'')}" placeholder="可空，例如「一起盖过房」"></div>
+    <div class="sectitle">关系数值 <span class="hint">0–100；20=认识 40=熟识 70=亲近 90=交心</span></div>
+    <div class="editrow"><label>亲密度</label><input type="number" id="relClo" min="0" max="100" value="${r.closeness}"></div>
+    <div class="editrow"><label>熟悉</label><input type="number" id="relFam" min="0" max="100" value="${r.familiarity}"></div>
+    <div class="editrow"><label>信任</label><input type="number" id="relTru" min="0" max="100" value="${r.trust}"></div>
+    <div class="sectitle">各场景里的称呼 <span class="hint">留空 = 自动跟随渠道账号/群消息</span></div>
+    ${meta.map(s=>{
+      const auto = s.name
+        ? `当前${s.source==='manual'?'人工':'自动'}：${esc(s.name)}${s.hint?`（${esc(s.hint)}）`:''}`
+        : '暂无来源';
+      return `<div class="editrow"><label>${esc(s.label)} <span class="dim">${auto}</span></label>
+        <input id="relSc_${esc(s.scene)}" value="${esc(s.source==='manual'?(s.name||''):'')}" placeholder="留空 = 自动">
+      </div>`;
+    }).join('')}
+    <div class="sectitle">只读</div>
+    <div class="kv">
+      <div class="k">身份 ID</div><div class="v mono">${esc(r.person_id)}</div>
+      <div class="k">阶段</div><div class="v"><span class="badge b-ok">${esc(r.stage)}</span></div>
+      <div class="k">首次见面</div><div class="v mono">${fmtTime(r.first_met_ms)}</div>
+      <div class="k">最近见面</div><div class="v mono">${fmtTime(r.last_met_ms)} <span class="dim">(${fmtAgo(r.last_met_ms)})</span></div>
+    </div>`,
+    `<button class="primary" id="relSave">保存</button>
+     <button id="relWho">看这个人的渠道账号 ›</button>
+     <span class="sp"></span>`);
+
+  $('relWho').onclick=()=>{ closeDrawer(); go('persons'); };
+  $('relSave').onclick=async()=>{
+    const scenes={};
+    meta.forEach(s=>{ const el=$('relSc_'+s.scene); if(el) scenes[s.scene]=el.value; });
+    try{
+      await apiDo('PATCH', `/api/admin/relations/${encodeURIComponent(r.person_id)}`, {
+        display_name: $('relName').value,
+        note: $('relNote').value,
+        familiarity: +($('relFam').value||0),
+        trust: +($('relTru').value||0),
+        closeness: +($('relClo').value||0),
+        scenes
+      });
+      toast('已保存'); closeDrawer(); render();
+    }catch(e){ toast('保存失败：'+e.message, true); }
+  };
+}
+
+// ---------- 特质
+async function renderTraits(c){
+  const d = await api('/api/admin/traits');
+  if(!d.items.length){
+    c.innerHTML='<div class="empty">还没有人格特质记录。<br><span class="dim">特质是长期经历沉淀出来的，只增不减。</span></div>';
+    return;
+  }
+  c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
+    人格成长：这些值由经历慢慢沉淀，不会因为一次事件剧烈变化。
+  </p>
+  <div class="cards">${d.items.map(t=>`
+    <div class="card" style="cursor:default">
+      <div class="k">${esc(t.trait_)}</div>
+      <div class="v">${t.value.toFixed(2)}</div>
+      <div class="m">${esc(t.word)} · ${fmtAgo(t.updated_ms)}</div>
+      <div style="margin-top:9px">${impBar(t.value)}</div>
+    </div>`).join('')}</div>`;
+}
+
+// ---------- 承诺
+async function renderPromises(c){
+  const d = await api('/api/admin/promises');
+  if(!d.items.length){
+    c.innerHTML='<div class="empty">还没有承诺记录。<br><span class="dim">它答应过玩家的事会记在这里，跨天不丢。</span></div>';
+    return;
+  }
+  const stBadge = s => ({
+    open:'b-warn', kept:'b-ok', broken:'b-err', abandoned:'b-extracted'
+  }[s] || 'b-extracted');
+  c.innerHTML = `<div class="tablewrap"><table><thead><tr>
+    <th>内容</th><th>状态</th><th>约定时间</th><th>创建</th><th>卡住原因</th></tr></thead>
+  <tbody>${d.items.map(p=>`<tr>
+    <td>${esc(p.description)}</td>
+    <td><span class="badge ${stBadge(p.status)}">${esc(p.status)}</span></td>
+    <td class="mono dim nowrap">${p.due_ms?fmtTime(p.due_ms):'—'}</td>
+    <td class="mono dim nowrap">${fmtAgo(p.created_ms)}</td>
+    <td class="dim">${esc(p.blocked_reason||'—')}</td></tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+// ---------- 注入回放
+async function renderReplay(c){
+  // 先取插件推上来的真实注入回放；它是「这一轮到底塞了什么」的权威来源。
+  // recall-traces 是 Hub 自己检索的轨迹，只在没有插件推送时才看它。
+  const inj = await api('/api/admin/injections');
+  const rows = inj.items || [];
+  if(rows.length){
+    c.innerHTML = `
+      <p class="dim" style="font-size:12.5px;margin:0 0 14px">
+        由 MC 插件每轮上报：这一次往提示词里塞了哪几条记忆、丢了哪几条、为什么。
+        <b>决策是插件做的</b>，中枢只负责存。
+      </p>
+      ${rows.map(r=>{
+        // replay 形如 "fact: f-12 score=0.413 | dropped f-7 (over budget)"
+        const parts = (r.replay||'').split('|').map(x=>x.trim()).filter(Boolean);
+        const kept = parts.filter(x=>!x.startsWith('dropped'));
+        const drop = parts.filter(x=>x.startsWith('dropped'));
+        return `<div class="trace">
+          <div class="trace-head">
+            <span class="mono" style="font-size:12px">${fmtTime(r.at_ms)}</span>
+            <span class="badge b-extracted">${esc(r.lane||'main')}</span>
+            ${r.query?`<span class="dim">查「${esc(r.query)}」</span>`:'<span class="dim">无关键词</span>'}
+            <span class="dim mono" style="font-size:11px">${r.chars} 字</span>
+            <span class="sp"></span>
+            ${r.injected?'<span class="badge b-ok">已注入</span>':'<span class="badge b-warn">未注入</span>'}
+            <span class="badge b-ok">${kept.length} 进</span>
+            ${drop.length?`<span class="badge b-warn">${drop.length} 丢</span>`:''}
+          </div>
+          <div class="trace-items">
+            ${parts.length? parts.map(p=>{
+              const isDrop = p.startsWith('dropped');
+              return `<div class="titem ${isDrop?'drop':'kept'}">
+                <span class="tbadge">${isDrop?'✕':'✓'}</span>
+                <span class="tt mono">${esc(p)}</span>
+              </div>`;
+            }).join('') : '<div class="titem"><span class="dim">（这次没有记录明细）</span></div>'}
+          </div>
+        </div>`;
+      }).join('')}`;
+    return;
+  }
+
+  // 没有插件推送时回退到 Hub 自己的检索轨迹
+  const d = await api('/api/admin/recall-traces');
+  const traces = d.items || [];
+  if(!traces.length){
+    c.innerHTML = `<div class="empty">
+      还没有注入回放。<br>
+      <span class="dim">它由 MC 插件每轮上报。<b>需要插件运行过一次真实回合</b>才会出现；
+      也可以用 <code>/ainpc memory &lt;npc&gt; preview</code> 触发一次（preview 不写回放）。</span>
+    </div>`;
+    return;
+  }
+  c.innerHTML = `
+    <p class="dim" style="font-size:12.5px;margin:0 0 14px">
+      回答的是「它为什么这么说 / 为什么没提那件事」。每次检索是一个 trace，
+      <b>进结果</b>的会进提示词，<b>丢弃</b>的留在候选里没被选中。
+    </p>
+    ${traces.map(t=>`
+      <div class="trace">
+        <div class="trace-head">
+          <span class="mono dim" style="font-size:11px">${esc(t.trace_id.slice(0,14))}</span>
+          <span class="mono" style="font-size:12px">${fmtTime(t.at_ms)}</span>
+          ${t.lane?`<span class="badge b-extracted">${esc(t.lane)}</span>`:''}
+          ${t.query?`<span class="dim">查「${esc(t.query)}」</span>`:'<span class="dim">无关键词（按权重）</span>'}
+          <span class="sp"></span>
+          <span class="badge b-ok">${t.kept} 进</span>
+          ${t.dropped?`<span class="badge b-warn">${t.dropped} 丢</span>`:''}
+        </div>
+        <div class="trace-items">
+          ${t.items.map(it=>`
+            <div class="titem ${it.kept?'kept':'drop'}">
+              <span class="tbadge">${it.kept?'✓':'✕'}</span>
+              <span class="badge b-${esc(it.kind==='fact'?'curated':'qq')}">${esc(it.kind)}</span>
+              <span class="tt">${esc((it.text||it.target_id).slice(0,64))}</span>
+              <span class="sp"></span>
+              <span class="mono dim" style="font-size:11px">${it.score!=null?it.score.toFixed(3):'—'}</span>
+              <span class="dim" style="font-size:11px">${esc(it.reason||'')}</span>
+            </div>`).join('')}
+        </div>
+      </div>`).join('')}`;
+}
+
+// ---------- 配置
+
+// ---------- 知识库
+//
+// 这个页面的重点不是「看数据」，是**维护**：
+//   ① 每个库的嵌入进度（pending / failed）—— 只说「检索不准」而不说
+//      有多少块没嵌进去，等于没说
+//   ② 导入（贴文本）
+//   ③ 检索测试 —— 改完配置要能立刻验证，而不是去命令行 curl
+//   ④ 重建向量 —— 换模型/换维度之后必须能一键重来，否则表现为
+//      「突然只能字面命中」且零报错
+async function renderKb(c){
+  const [health, list] = await Promise.all([
+    api('/api/admin/kb/health'),
+    api('/api/admin/kb'),
+  ]);
+  const kbs = list.kbs || [];
+  const e = health.embed || {};
+
+  // 嵌入状态徽章
+  const stateBadge = (st) => {
+    const map = {
+      ok:         ['#2e7d47','正常'],
+      degraded:   ['#8a5a00','有失败'],
+      unavailable:['#8a2020','不可用'],
+      disabled:   ['#4d586b','未启用'],
+    };
+    const [color, text] = map[st] || ['#4d586b', st];
+    return `<span style="background:${color};color:#fff;padding:2px 8px;border-radius:20px;font-size:11.5px">${text}</span>`;
+  };
+
+  const healthCard = `
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <b style="font-size:14px">嵌入服务</b>
+        ${stateBadge(e.state)}
+        <span class="dim" style="font-size:12px">${esc(e.model||'—')} · ${e.dim||'?'} 维</span>
+      </div>
+      <div class="kv" style="grid-template-columns:110px 1fr">
+        <div class="k">地址</div><div class="v mono" style="font-size:11.5px">${esc(e.url||'（未配置）')}</div>
+        <div class="k">已嵌入</div><div class="v mono">${fmtNum(e.done||0)} 块</div>
+        <div class="k">待嵌入</div><div class="v mono">${fmtNum(e.pending||0)} 块${(e.pending||0)>0?' <span class="dim">（后台正在补）</span>':''}</div>
+        <div class="k">失败</div><div class="v mono" style="${(e.failed||0)>0?'color:var(--err)':''}">${fmtNum(e.failed||0)} 块</div>
+        ${e.last_error?`<div class="k">最近错误</div><div class="v" style="color:var(--err);font-size:12px">${esc(e.last_error)}</div>`:''}
+      </div>
+      ${(e.failed||0)>0?`<div style="margin-top:10px">
+        <button class="primary" id="btnReembedAll">全部重建向量</button>
+        <span class="dim" style="font-size:12px;margin-left:8px">失败的块不会被自动重试，需要手动重置</span>
+      </div>`:''}
+      ${e.state==='disabled'?`<div class="dim" style="margin-top:8px;font-size:12.5px">
+        知识库未启用。在启动脚本里设 <code>BLUEWHALE_KB_ENABLE=true</code> 并配置 <code>BLUEWHALE_KB_EMBED_URL</code>。
+        未启用时导入的文档仍可被<b>字面</b>命中，只是没有语义检索。</div>`:''}
+    </div>`;
+
+  const kbRows = kbs.map(k=>`
+    <tr data-kb='${esc(JSON.stringify(k))}' style="cursor:pointer">
+      <td class="mono">${esc(k.id)}</td>
+      <td>${esc(k.name)}</td>
+      <td class="num">${fmtNum(k.docs)}</td>
+      <td class="num">${fmtNum(k.chunks)}</td>
+      <td class="num">${fmtNum(k.embedded)}</td>
+      <td class="num" style="${k.pending>0?'color:#8a5a00':''}">${fmtNum(k.pending)}</td>
+      <td class="num" style="${k.failed>0?'color:var(--err)':''}">${fmtNum(k.failed)}</td>
+    </tr>`).join('');
+
+  c.innerHTML = `
+    ${healthCard}
+    <div class="tbl-head" style="border:1px solid var(--line);border-radius:10px 10px 0 0">
+      <span class="t">知识库</span>
+      <span class="dim">${kbs.length} 本 · 外部资料，与 NPC 记忆分开存</span>
+      <span class="sp"></span>
+      <button id="btnNewKb">新建知识库</button>
+      <button class="primary" id="btnImport">导入文档</button>
+    </div>
+    <div class="tablewrap" style="border-radius:0 0 10px 10px;border-top:0">
+      ${kbs.length?`<table><thead><tr>
+        <th>id</th><th>名称</th><th class="num">文档</th><th class="num">块</th>
+        <th class="num">已嵌入</th><th class="num">待嵌</th><th class="num">失败</th>
+      </tr></thead><tbody>${kbRows}</tbody></table>`
+      :`<div class="empty" style="margin:20px">
+         还没有知识库。<br>
+         <span class="dim" style="font-size:12.5px">知识库存的是<b>外部资料</b>（设定、攻略、规则），
+         不衰减、不会被回滚忘掉。先点「新建知识库」。</span>
+        </div>`}
+    </div>
+
+    <div class="sectitle" style="margin-top:22px">检索测试</div>
+    <p class="dim" style="font-size:12.5px;margin:0 0 10px">
+      在这里直接验证检索效果 —— 改完配置不用去命令行 curl。
+      会给每条结果标出它是<b>靠向量</b>还是<b>靠字面</b>命中的（<code>lit=0</code> 意味着字面完全没重叠，纯靠语义）。
+    </p>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input id="kbQ" placeholder="输入一个问题，回车检索…" style="flex:1;padding:9px 12px;
+        background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--fg);font-size:13px">
+      <select id="kbScope" style="padding:9px 12px;background:var(--panel);border:1px solid var(--line);
+        border-radius:8px;color:var(--fg);font-size:13px">
+        <option value="">全部库</option>
+        ${kbs.map(k=>`<option value="${esc(k.id)}">${esc(k.name)}</option>`).join('')}
+      </select>
+      <button class="primary" id="btnKbSearch">检索</button>
+    </div>
+    <div id="kbResults"></div>`;
+
+  // ---- 交互
+  const refresh = () => render();
+
+  $('btnNewKb') && ($('btnNewKb').onclick = () => {
+    showDrawer('新建知识库', `
+      <div class="kv" style="grid-template-columns:80px 1fr">
+        <div class="k">id</div><div class="v"><input id="nkId" placeholder="mc-lore" style="${inputStyle()}"></div>
+        <div class="k">名称</div><div class="v"><input id="nkName" placeholder="MC 设定" style="${inputStyle()}"></div>
+        <div class="k">说明</div><div class="v"><input id="nkDesc" placeholder="可选" style="${inputStyle()}"></div>
+      </div>
+      <div style="margin-top:14px"><button class="primary" id="nkGo">创建</button></div>`);
+    $('nkGo').onclick = async () => {
+      const id = $('nkId').value.trim(), name = $('nkName').value.trim();
+      if(!id || !name) return alert('id 和名称都要填');
+      try{
+        await apiDo('POST', '/api/admin/kb', {
+          id, name, description: $('nkDesc').value.trim() || null });
+        closeDrawer(); refresh();
+      }catch(err){ alert('创建失败：'+err.message); }
+    };
+  });
+
+  $('btnImport') && ($('btnImport').onclick = () => {
+    if(!kbs.length) return alert('先建一个知识库');
+    showDrawer('导入文档', `
+      <div class="kv" style="grid-template-columns:80px 1fr">
+        <div class="k">知识库</div><div class="v">
+          <select id="imKb" style="${inputStyle()}">
+            ${kbs.map(k=>`<option value="${esc(k.id)}">${esc(k.name)}</option>`).join('')}
+          </select></div>
+        <div class="k">标题</div><div class="v"><input id="imTitle" placeholder="可选" style="${inputStyle()}"></div>
+        <div class="k">来源</div><div class="v"><input id="imSrc" placeholder="文件名 / URL，可选" style="${inputStyle()}"></div>
+      </div>
+      <div class="sectitle">内容</div>
+      <textarea id="imContent" rows="14" placeholder="粘贴文档内容。支持 markdown 标题（# / ##），会按标题自动分块。"
+        style="width:100%;padding:10px;background:var(--panel);border:1px solid var(--line);
+        border-radius:8px;color:var(--fg);font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      <p class="dim" style="font-size:12px;margin:8px 0 0">
+        导入后**立刻可用**，向量在后台生成。生成完成前只能被字面命中 ——
+        状态可以在上面的「待嵌入」里看到。</p>
+      <div style="margin-top:12px"><button class="primary" id="imGo">导入</button></div>`);
+    $('imGo').onclick = async () => {
+      const content = $('imContent').value;
+      if(!content.trim()) return alert('内容不能为空');
+      try{
+        const r = await apiDo('POST', '/api/admin/kb/doc', {
+          kb_id: $('imKb').value, title: $('imTitle').value.trim() || null,
+          source: $('imSrc').value.trim() || null, content });
+        closeDrawer();
+        alert(r.duplicate ? '这份内容已经在库里了（按内容指纹去重）'
+                          : `已导入 ${r.n_chunks} 块，向量在后台生成`);
+        refresh();
+      }catch(err){ alert('导入失败：'+err.message); }
+    };
+  });
+
+  $('btnReembedAll') && ($('btnReembedAll').onclick = async () => {
+    if(!confirm('把失败的块重置为待嵌入，让后台重新尝试？')) return;
+    try{
+      const r = await apiDo('POST', '/api/admin/kb/reembed');
+      alert(`已重置 ${r.reset} 块，后台正在重新嵌入`);
+      refresh();
+    }catch(err){ alert('重建失败：'+err.message); }
+  });
+
+  c.querySelectorAll('[data-kb]').forEach(el=>el.onclick = () => {
+    const k = JSON.parse(el.dataset.kb);
+    showDrawer(k.name, `
+      <div class="kv">
+        <div class="k">id</div><div class="v mono">${esc(k.id)}</div>
+        <div class="k">文档</div><div class="v mono">${fmtNum(k.docs)} 篇</div>
+        <div class="k">块</div><div class="v mono">${fmtNum(k.chunks)}</div>
+        <div class="k">已嵌入</div><div class="v mono">${fmtNum(k.embedded)}</div>
+        <div class="k">待嵌入</div><div class="v mono">${fmtNum(k.pending)}</div>
+        <div class="k">失败</div><div class="v mono">${fmtNum(k.failed)}</div>
+        ${k.description?`<div class="k">说明</div><div class="v">${esc(k.description)}</div>`:''}
+      </div>
+      <div class="sectitle">文档（${k.docs} 篇）</div>
+      ${(k.docs_detail||[]).length ? `<div style="max-height:260px;overflow-y:auto">
+        ${k.docs_detail.map(d=>`
+          <div style="display:flex;align-items:center;gap:8px;padding:8px 0;
+                      border-bottom:1px solid var(--line)">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px">${esc(d.title||'（无标题）')}</div>
+              <div class="dim mono" style="font-size:11px">
+                ${fmtNum(d.n_chunks)} 块 · ${esc(d.source||'—')} · ${fmtTime(d.created_ms)}
+              </div>
+            </div>
+            <button data-open="${esc(d.id)}" style="flex:none">查看 / 编辑</button>
+            <button class="danger" data-del="${esc(d.id)}" style="flex:none">删除</button>
+          </div>`).join('')}
+      </div>` : `<div class="dim" style="font-size:12px">还没有文档，点上面「导入文档」。</div>`}
+
+      <div class="sectitle">操作</div>
+      <button id="kbReembedOne">重建本库向量</button>
+      <p class="dim" style="font-size:12px;margin-top:8px">
+        换了嵌入模型或维度之后必须重建 —— 旧向量会被判定为不匹配而直接剔除，
+        表现为「突然只能字面命中」，且没有任何报错。</p>`);
+
+    // 抽屉内容是 `#drawerBody`，**不在** `c`（主内容区）里面。
+    // 早先这里写成 `c.querySelectorAll(...)`，于是永远查不到元素、
+    // 点了完全没反应 —— 面板上看像「按钮坏了」，实际是选择器找错了地方。
+    const dbody = $('drawerBody');
+    dbody.querySelectorAll('[data-open]').forEach(btn=>{
+      btn.onclick = () => openDocEditor(btn.dataset.open);
+    });
+    // 删除文档：逻辑删除，它的块随之不再进检索候选
+    dbody.querySelectorAll('[data-del]').forEach(btn=>{
+      btn.onclick = async (ev) => {
+        ev.stopPropagation();
+        if(!confirm('删除这篇文档？它的所有块会立刻从检索候选里排除（逻辑删除，可回滚）。')) return;
+        try{
+          await apiDo('DELETE', '/api/admin/kb/doc/'+encodeURIComponent(btn.dataset.del));
+          closeDrawer(); refresh();
+        }catch(err){ alert('删除失败：'+err.message); }
+      };
+    });
+    $('kbReembedOne').onclick = async () => {
+      if(!confirm(`重建「${k.name}」的全部向量？`)) return;
+      try{
+        const r = await apiDo('POST', '/api/admin/kb/reembed?kb_id='+encodeURIComponent(k.id));
+        alert(`已重置 ${r.reset} 块`);
+        closeDrawer(); refresh();
+      }catch(err){ alert('失败：'+err.message); }
+    };
+  });
+
+  const doSearch = async () => {
+    const q = $('kbQ').value.trim();
+    if(!q) return;
+    const scope = $('kbScope').value;
+    const box = $('kbResults');
+    box.innerHTML = '<div class="dim" style="padding:14px">检索中…（首次查询会触发模型冷加载）</div>';
+    try{
+      const params = new URLSearchParams({q, topk:'8'});
+      if(scope) params.set('kb_id', scope);
+      const r = await api('/api/admin/kb/search?'+params);
+      if(!r.hits.length){
+        box.innerHTML = `<div class="empty">没有命中。
+          ${r.degraded?`<div class="dim" style="margin-top:6px">降级原因：${esc(r.degraded)}</div>`:''}
+          </div>`;
+        return;
+      }
+      box.innerHTML = `
+        <div class="dim" style="font-size:12px;margin-bottom:8px">
+          候选池 ${fmtNum(r.pool_size)} 块${r.degraded?` · <span style="color:#8a5a00">降级：${esc(r.degraded)}</span>`:''}
+        </div>
+        ${r.hits.map((h,i)=>`
+          <div class="card" style="margin-bottom:10px;cursor:pointer" data-chunk="${esc(h.chunk_id)}">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <b style="font-size:13px">${esc(h.heading||'（无标题）')}</b>
+              <span class="dim mono" style="font-size:11.5px">#${i+1}</span>
+              <span class="sp" style="flex:1"></span>
+              <span class="mono" style="font-size:11.5px;color:var(--dim)">score ${h.score.toFixed(4)}</span>
+            </div>
+            <div style="font-size:12.5px;line-height:1.6;white-space:pre-wrap">${esc(h.text.slice(0,300))}${h.text.length>300?'…':''}</div>
+            <div style="margin-top:8px;font-size:11.5px" class="mono">
+              <span style="color:${h.vec>0?'#2e7d47':'var(--dim)'}">vec=${h.vec.toFixed(3)}</span>
+              <span style="color:${h.lit>0?'#2e7d47':'var(--dim)'};margin-left:10px">lit=${h.lit.toFixed(3)}</span>
+              ${h.vec>0&&h.lit>0?'<span style="margin-left:10px;color:#2e7d47">两路都命中</span>':
+                h.vec>0?'<span style="margin-left:10px;color:var(--dim)">仅向量</span>':
+                        '<span style="margin-left:10px;color:var(--dim)">仅字面</span>'}
+            </div>
+          </div>`).join('')}`;
+      box.querySelectorAll('[data-chunk]').forEach(el=>el.onclick = async () => {
+        const d = await api('/api/admin/kb/chunk/'+encodeURIComponent(el.dataset.chunk));
+        showDrawer('块详情', `
+          <div class="kv">
+            <div class="k">id</div><div class="v mono" style="font-size:11.5px">${esc(d.id)}</div>
+            <div class="k">文档</div><div class="v mono" style="font-size:11.5px">${esc(d.doc_id)}</div>
+            <div class="k">顺序</div><div class="v mono">#${d.ord}</div>
+            <div class="k">标题</div><div class="v">${esc(d.heading||'—')}</div>
+            <div class="k">嵌入</div><div class="v mono">${esc(d.embed_state)}
+              ${d.embed_tries>0?`（试过 ${d.embed_tries} 次）`:''}</div>
+            ${d.embed_err?`<div class="k">错误</div><div class="v" style="color:var(--err);font-size:12px">${esc(d.embed_err)}</div>`:''}
+            ${d.vec_dim?`<div class="k">向量</div><div class="v mono">${d.vec_dim} 维 · ${esc(d.vec_embedder||'?')}</div>`:''}
+          </div>
+          <div class="sectitle">正文</div>
+          <pre class="body" style="white-space:pre-wrap">${esc(d.text)}</pre>`);
+      });
+    }catch(err){
+      box.innerHTML = `<div class="empty" style="color:var(--err)">检索失败：${esc(err.message)}</div>`;
+    }
+  };
+  $('btnKbSearch').onclick = doSearch;
+  $('kbQ').onkeydown = (e)=>{ if(e.key==='Enter') doSearch(); };
+}
+
+/// 打开文档的「查看 / 编辑」抽屉。
+///
+/// 为什么以**整篇文档**为单位编辑，而不是逐块编辑：
+/// 块是从原文切出来的派生物，不是真相。允许逐块改会导致
+/// 「原文与块不一致」，之后任何一次重新切块都会把逐块修改悄悄抹掉。
+/// 所以真相是原文，改原文 → 重新切块 → 重新嵌入，这条链路是单向的。
+async function openDocEditor(docId){
+  const d = await api('/api/admin/kb/doc/'+encodeURIComponent(docId));
+  const chunkRows = d.chunks.map(c=>`
+    <div style="padding:8px 0;border-bottom:1px solid var(--line)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="mono dim" style="font-size:11px">#${c.ord}</span>
+        <b style="font-size:12.5px">${esc(c.heading||'（无标题）')}</b>
+        <span style="flex:1"></span>
+        <span class="mono" style="font-size:11px;color:${c.embed_state==='done'?'#2e7d47':c.embed_state==='failed'?'var(--err)':'#8a5a00'}">
+          ${esc(c.embed_state)}${c.embed_tries>0?` (${c.embed_tries}次)`:''}
+        </span>
+      </div>
+      <div style="font-size:12px;line-height:1.55;margin-top:4px;color:var(--fg2)">
+        ${esc(c.text.slice(0,160))}${c.text.length>160?'…':''}
+      </div>
+      ${c.embed_err?`<div class="dim" style="font-size:11px;color:var(--err)">${esc(c.embed_err)}</div>`:''}
+    </div>`).join('');
+
+  showDrawer(d.title||'（无标题）', `
+    ${d.content_reassembled?`
+      <div style="background:#2a2216;border:1px solid #5c4520;border-radius:8px;padding:9px 12px;
+                  font-size:12px;margin-bottom:12px">
+        这篇文档是旧版本导入的，<b>库里没有存原文</b>，下面是按块拼回来的。
+        保存会把拼回来的内容当作新原文 —— 格式可能与原始文件有细微差异。
+      </div>`:''}
+    <div class="kv" style="grid-template-columns:80px 1fr">
+      <div class="k">标题</div><div class="v">
+        <input id="deTitle" value="${esc(d.title||'')}" style="${inputStyle()}"></div>
+      <div class="k">来源</div><div class="v mono" style="font-size:11.5px">${esc(d.source||'—')}</div>
+      <div class="k">块数</div><div class="v mono">${fmtNum(d.n_chunks)}</div>
+    </div>
+
+    <div class="sectitle">内容</div>
+    <textarea id="deContent" rows="16" style="width:100%;padding:10px;background:var(--panel);
+      border:1px solid var(--line);border-radius:8px;color:var(--fg);font-size:13px;
+      font-family:ui-monospace,monospace;resize:vertical;line-height:1.6">${esc(d.content)}</textarea>
+    <p class="dim" style="font-size:12px;margin:6px 0 0">
+      改内容会<b>重新切块并重新生成向量</b>（旧块物理删除，新块需要重新嵌入）。
+      只改标题不会重建。用 <code>#</code> 标标题会被切成独立的块。</p>
+
+    <div style="margin-top:12px;display:flex;gap:8px">
+      <button class="primary" id="deSave">保存</button>
+      <button id="deCancel">取消</button>
+    </div>
+
+    <div class="sectitle">切块明细（${d.chunks.length} 块）</div>
+    ${chunkRows||'<div class="dim" style="font-size:12px">没有块</div>'}`);
+  $('deCancel').onclick = closeDrawer;
+  $('deSave').onclick = async () => {
+    const title = $('deTitle').value.trim() || null;
+    const content = $('deContent').value;
+    if(!content.trim()) return alert('内容不能为空');
+    const changed = content !== d.content;
+    if(changed && !confirm('内容改过了，保存会重新切块并重新嵌入全部块。继续？')) return;
+    try{
+      const r = await apiDo('PATCH', '/api/admin/kb/doc/'+encodeURIComponent(docId), {title, content});
+      closeDrawer();
+      alert(r.rechunked ? `已保存，重新切成 ${r.n_chunks} 块，向量在后台重新生成`
+                        : '已保存（只改了标题，未重建块）');
+      render();
+    }catch(err){ alert('保存失败：'+err.message); }
+  };
+}
+
+/// 面板里内联输入框的统一样式（与既有页面保持一致）。
+function inputStyle(){
+  return 'width:100%;padding:8px 10px;background:var(--panel);border:1px solid var(--line);'+
+         'border-radius:7px;color:var(--fg);font-size:13px';
+}
+
+async function renderSettings(c){
+  const d = await api('/api/admin/settings');
+  const w = d.weight;
+
+  const field = (k, label, hint, val, step) => `
+    <div class="editrow">
+      <label>${label} <span class="dim">${hint}</span></label>
+      <input id="s_${k}" type="number" step="${step}" value="${val}">
+    </div>`;
+
+  c.innerHTML = `
+    <div class="sectitle">权重模型 <span class="hint">改完立即生效并落盘到 weights.json</span></div>
+    <p class="dim" style="font-size:12.5px;margin:0 0 14px">
+      <code>weight = importance^exp × 衰减(半衰期) × 强化(回忆次数) × 渠道可信度</code><br>
+      这一块决定检索时谁排在前面。改错了随时能改回来，所以允许在线改。
+    </p>
+    <div class="cfg-grid">
+      ${field('importance_exp','重要度指数','>1 拉大高分项差距', w.importance_exp, 0.1)}
+      ${field('half_life_days','半衰期','天；0=关闭衰减', w.half_life_days, 1)}
+      ${field('decay_floor','衰减下限','[0,1]，老记忆不归零', w.decay_floor, 0.05)}
+      ${field('reinforce_gain','回忆强化','每次 +；有上限', w.reinforce_gain, 0.01)}
+      ${field('reinforce_cap','强化上限','不能 <1，否则变削弱', w.reinforce_cap, 0.1)}
+    </div>
+
+    <div class="sectitle">渠道可信度 <span class="hint">弹幕可能有玩笑和反串，所以低于 MC</span></div>
+    <div class="cfg-grid">
+      ${field('channel_trust_mc','MC','亲历，最高', w.channel_trust_mc, 0.05)}
+      ${field('channel_trust_qq','QQ','群聊', w.channel_trust_qq, 0.05)}
+      ${field('channel_trust_live','直播','弹幕', w.channel_trust_live, 0.05)}
+      ${field('channel_trust_system','系统','服务自己产生', w.channel_trust_system, 0.05)}
+    </div>
+    <div style="display:flex;gap:9px;margin-bottom:26px">
+      <button class="primary" id="cfgSave">保存并生效</button>
+      <button id="cfgReload">重新读取</button>
+    </div>
+
+    <div class="sectitle">运行环境 <span class="hint">只读；改这些需要重启，不在面板里动</span></div>
+    <div class="kv" style="background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px">
+      <div class="k">监听</div><div class="v mono">${esc(d.bind)}${d.loopback_only?' <span class="dim">（仅本机）</span>':''}</div>
+      <div class="k">数据目录</div><div class="v mono" style="font-size:11.5px">${esc(d.data_dir)}</div>
+      <div class="k">数据库</div><div class="v mono" style="font-size:11.5px">${esc(d.db_path)}</div>
+      <div class="k">快照目录</div><div class="v mono" style="font-size:11.5px">${esc(d.snapshot_dir)}</div>
+      <div class="k">快照保留</div><div class="v">${d.snapshot_keep_days} 天（每 ${Math.round(d.snapshot_check_seconds/60)} 分钟检查一次）</div>
+      <div class="k">并发上限</div><div class="v mono">${d.max_concurrency}</div>
+      <div class="k">请求体上限</div><div class="v mono">${fmtBytes(d.max_body_bytes)}</div>
+      <div class="k">请求超时</div><div class="v mono">${d.request_timeout_seconds} 秒</div>
+      <div class="k">API token</div><div class="v">${d.token_configured?'<span class="badge b-ok">已配置</span>':'<span class="badge b-warn">未配置（仅本机可用）</span>'}</div>
+      <div class="k">后台登录</div><div class="v">${d.panel_login?`<span class="badge b-ok">已启用</span> <span class="mono dim">${esc(d.panel_user)}</span>`:'<span class="badge b-warn">未启用</span>'}</div>
+    </div>
+    <p class="dim" style="font-size:11.5px;margin-top:12px">
+      ⚠ 凭据（token / 口令）**永远不在这里显示**，只有「配没配」。面板能读配置不等于能读密码。
+    </p>`;
+
+  $('cfgSave').onclick=async()=>{
+    const body = {};
+    ['importance_exp','half_life_days','decay_floor','reinforce_gain','reinforce_cap',
+     'channel_trust_mc','channel_trust_qq','channel_trust_live','channel_trust_system']
+      .forEach(k=>{ const el=$('s_'+k); if(el) body[k]=+el.value; });
+    try{
+      const r = await fetch('/api/admin/settings', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body)
+      });
+      if(!r.ok){
+        let m=r.status+'';
+        try{const j=await r.json(); if(j.error)m=j.error;}catch(_){}
+        toast('保存失败：'+m, true); return;
+      }
+      toast('已保存，权重立即生效');
+      renderSettings(c);
+    }catch(e){ toast('保存失败：'+e.message, true); }
+  };
+  $('cfgReload').onclick=()=>renderSettings(c);
+}
+
+// ---------- 快照
+async function renderSnapshots(c){
+  const list = await api('/api/admin/snapshots');
+  if(!list.length){
+    c.innerHTML='<div class="empty">还没有快照。服务每天自动拍一份，也可以用 CLI <code>snapshot</code> 手动拍。</div>';
+    return;
+  }
+  c.innerHTML = `
+    <div class="tbl-head" style="border:1px solid var(--line);border-radius:10px 10px 0 0">
+      <span class="t">快照</span>
+      <span class="dim">共 ${list.length} 份 · 每天自动一份</span>
+      <span class="sp"></span>
+      <button class="primary" id="btnSnapNow">立刻拍一份</button>
+    </div>
+    <div class="tablewrap" style="border-radius:0 0 10px 10px;border-top:0">
+      <table><thead><tr>
+        <th>时间</th><th class="num">大小</th><th class="num">行数</th>
+        <th>sha256</th><th>说明</th></tr></thead>
+      <tbody>${list.map(s=>`<tr style="cursor:pointer" data-snap='${esc(JSON.stringify(s))}'>
+        <td class="mono nowrap">${fmtTime(s.taken_ms)} <span class="dim">${fmtAgo(s.taken_ms)}</span></td>
+        <td class="num">${fmtBytes(s.bytes)}</td>
+        <td class="num">${fmtNum(s.rows)}</td>
+        <td class="mono dim">${esc((s.sha256||'').slice(0,12))}…</td>
+        <td class="dim">${esc(s.note||'—')}</td></tr>`).join('')}</tbody></table>
+    </div>`;
+
+  c.querySelectorAll('[data-snap]').forEach(el=>el.onclick=()=>{
+    const s=JSON.parse(el.dataset.snap);
+    showDrawer('快照 #'+s.id, `<div class="kv">
+      <div class="k">时间</div><div class="v mono">${fmtTime(s.taken_ms)}</div>
+      <div class="k">大小</div><div class="v mono">${fmtBytes(s.bytes)}</div>
+      <div class="k">行数</div><div class="v mono">${fmtNum(s.rows)}</div>
+      <div class="k">说明</div><div class="v">${esc(s.note||'—')}</div>
+      <div class="k">文件</div><div class="v mono" style="font-size:11.5px">${esc(s.path)}</div>
+    </div><div class="sectitle">sha256</div><pre class="body">${esc(s.sha256)}</pre>
+    <div class="sectitle">回滚到这个时刻</div>
+    <p class="dim" style="font-size:12.5px;margin:0 0 10px">
+      会把晚于该时刻的记忆全部遗忘（可撤销）。命令行：<code>rollback --to ${s.taken_ms}</code></p>`);
+  });
+
+  $('btnSnapNow').onclick=async()=>{
+    try{
+      // 走后台自己的接口：用会话鉴权，不需要 API token。
+      // 之前这里调 /v1/snapshot，那是给脚本用的链，混用会让面板用户
+      // 被要求去填一个他不该需要的东西。
+      const r=await fetch('/api/admin/snapshot',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({note:'面板手动'})});
+      if(r.status===401){ toast('会话已过期，请重新登录',true); return; }
+      if(!r.ok){ let m=r.status+''; try{const j=await r.json(); if(j.error)m=j.error;}catch(_){} toast('失败：'+m,true); return; }
+      const d=await r.json();
+      toast(`快照已生成：${fmtBytes(d.bytes)}，${d.rows} 行`);
+      renderSnapshots(c);
+    }catch(e){ toast('失败：'+e.message,true); }
+  };
+}
+
+// ---------- 回滚
+async function renderRollbacks(c){
+  const list = await api('/api/admin/rollbacks');
+  if(!list.length){
+    c.innerHTML='<div class="empty">还没有回滚记录。<br><span class="dim">回滚是逻辑删除，可以撤销。</span></div>';
+    return;
+  }
+  c.innerHTML = `<div class="tablewrap"><table><thead><tr>
+    <th>#</th><th>发生时间</th><th>回滚到</th><th>模式</th><th>说明</th></tr></thead>
+    <tbody>${list.map(r=>`<tr>
+      <td class="mono">${r.id}</td>
+      <td class="mono nowrap">${fmtTime(r.at_ms)}</td>
+      <td class="mono nowrap">${fmtTime(r.target_ms)}</td>
+      <td><span class="badge ${r.mode==='undo'?'b-warn':'b-ok'}">${r.mode==='undo'?'撤销':'逻辑回滚'}</span></td>
+      <td class="dim">${esc(r.note||'—')}${r.undo_of?` <span class="dim">(撤销 #${r.undo_of})</span>`:''}</td>
+    </tr>`).join('')}</tbody></table></div>
+    <p class="dim" style="font-size:12.5px;margin-top:14px">
+      回滚是逻辑删除：数据还在库里，只是不再出现在检索里。
+      用 <code>undo --id &lt;n&gt;</code> 可以撤销。</p>`;
+}
+
+// ---------- 系统
+async function renderSystem(c){
+  // ⚠ 只用**会话鉴权**的接口。
+  // `/v1/*` 走的是 API token，面板带的是 session cookie —— 拿 cookie 去访问
+  // `/v1/stats` 会 401，`st` 变成 null 之后 `st.weight_config.xxx` 直接崩。
+  // 这是同一个坑第二次踩：/v1/health 免鉴权所以一直没暴露，
+  // 一旦某个页面要的是需要 token 的 /v1 接口，整页就白。
+  const [h, s, cfg] = await Promise.all([
+    api('/v1/health'),                 // 免鉴权，只有计数
+    api('/api/admin/session'),
+    api('/api/admin/settings'),        // 权重走这里，session 鉴权
+  ]);
+  const w = cfg.weight;
+  c.innerHTML = `
+    <div class="sectitle">服务状态</div>
+    <div class="kv" style="background:var(--panel);border:1px solid var(--line);
+         border-radius:10px;padding:16px 18px">
+      <div class="k">应用</div><div class="v">${esc(h.app)}</div>
+      <div class="k">版本</div><div class="v mono">${esc(h.version)}</div>
+      <div class="k">schema</div><div class="v mono">${h.schema_version}</div>
+      <div class="k">已运行</div><div class="v">${Math.floor(h.uptime_ms/1000)} 秒</div>
+      <div class="k">监听</div><div class="v mono">${esc(h.bind)}</div>
+      <div class="k">仅本机</div><div class="v">${h.loopback_only?'是':'否'}</div>
+      <div class="k">写入次数</div><div class="v mono">${fmtNum(h.writes)}</div>
+      <div class="k">去重命中</div><div class="v mono">${fmtNum(h.dedup_hits)}</div>
+      <div class="k">WAL 大小</div><div class="v mono">${fmtBytes(h.wal_bytes)}</div>
+      <div class="k">当前登录</div><div class="v">${esc(s.user||'—')} <span class="dim">（活跃会话 ${s.active_sessions}）</span></div>
+    </div>
+
+    <div class="sectitle">权重配置 <span class="hint">决定检索时谁排在前面 · 可在「配置」页改</span></div>
+    <div class="kv" style="background:var(--panel);border:1px solid var(--line);
+         border-radius:10px;padding:16px 18px">
+      <div class="k">重要度指数</div><div class="v mono">${w.importance_exp}</div>
+      <div class="k">半衰期</div><div class="v mono">${w.half_life_days} 天</div>
+      <div class="k">衰减下限</div><div class="v mono">${w.decay_floor}</div>
+      <div class="k">回忆强化</div><div class="v mono">+${w.reinforce_gain} / 次（上限 ×${w.reinforce_cap}）</div>
+      <div class="k">渠道可信度</div><div class="v mono">MC ${w.channel_trust_mc} · QQ ${w.channel_trust_qq} · 直播 ${w.channel_trust_live}</div>
+    </div>
+
+    <div class="sectitle">记忆体检</div>
+    <div class="tablewrap"><table><thead><tr><th>检查项</th><th>状态</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>最近快照</td>
+        <td>${h.latest_snapshot_ms?`<span class="badge b-ok">${fmtAgo(h.latest_snapshot_ms)}</span>`:'<span class="badge b-err">无</span>'}</td>
+        <td class="dim">${h.latest_snapshot_ms?fmtTime(h.latest_snapshot_ms):'没有快照就无法回滚'}</td></tr>
+      <tr><td>回滚待清理</td>
+        <td>${h.forgotten_rows?`<span class="badge b-warn">${fmtNum(h.forgotten_rows)} 行</span>`:'<span class="badge b-ok">干净</span>'}</td>
+        <td class="dim">逻辑删除的行，可用 purge 物理回收</td></tr>
+      <tr><td>WAL</td>
+        <td><span class="badge b-ok">${fmtBytes(h.wal_bytes)}</span></td>
+        <td class="dim">checkpoint 会覆盖而非截断，文件大≠有积压</td></tr>
+    </tbody></table></div>`;
+}
+
+// ============================================================ 抽屉
+/// 打开详情抽屉。`foot` 是可选的底部操作区 HTML（编辑保存按钮等）。
+function showDrawer(title, html, foot){
+  $('drawerTitle').textContent = title;
+  $('drawerBody').innerHTML = html;
+  const f=$('drawerFoot');
+  if(foot){ f.innerHTML=foot; f.style.display='flex'; }
+  else { f.innerHTML=''; f.style.display='none'; }
+  $('drawer').classList.add('on');
+  $('mask').classList.add('on');
+}
+
+/// 提交编辑。成功后重查当前页；失败把原因显示在抽屉里。
+async function savePatch(url, body, onDone){
+  try{
+    const r = await fetch(url, {
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','X-API-Token':localStorage.getItem('bw_api_token')||''},
+      body: JSON.stringify(body)
+    });
+    if(r.status===401){ toast('需要 API token 才能编辑（后台会话不能替代 API token）', true); return; }
+    if(!r.ok){
+      let m=r.status+'';
+      try{ const j=await r.json(); if(j.error) m=j.error; }catch(_){}
+      toast('保存失败：'+m, true); return;
+    }
+    toast('已保存');
+    closeDrawer();
+    render();
+    if(onDone) onDone();
+  }catch(e){ toast('保存失败：'+e.message, true); }
+}
+
+/// 删除前必须二次确认。删除是逻辑删除（可撤销），但界面上不该一声不吭就没。
+function confirmDelete(url, what){
+  const note = prompt(`确定删除${what}？\n\n这是逻辑删除，数据还在库里，可以用回滚撤销恢复。\n\n（可填写删除原因，留空也行）`);
+  if(note === null) return; // 点了取消
+  apiToken();
+  fetch(url, {
+    method:'DELETE',
+    headers:{'Content-Type':'application/json','X-API-Token':localStorage.getItem('bw_api_token')||''},
+    body: JSON.stringify({note: note || null})
+  }).then(async r=>{
+    if(r.status===401){ toast('需要 API token 才能删除', true); return; }
+    if(!r.ok){
+      let m=r.status+'';
+      try{const j=await r.json(); if(j.error)m=j.error;}catch(_){}
+      toast('删除失败：'+m, true); return;
+    }
+    toast('已删除（可用回滚撤销）');
+    closeDrawer(); render();
+  }).catch(e=>toast('删除失败：'+e.message, true));
+}
+
+/// 取编辑用的 API token（存在浏览器里，只用于写操作）。
+function apiToken(){
+  let t = localStorage.getItem('bw_api_token');
+  if(!t){
+    t = prompt('编辑需要 API token（服务端 BLUEWHALE_TOKEN 那串）\n\n只存在本浏览器里，不会上传。');
+    if(t) localStorage.setItem('bw_api_token', t.trim());
+  }
+  return t || '';
+}
+function closeDrawer(){
+  $('drawer').classList.remove('on');
+  $('mask').classList.remove('on');
+}
+$('drawerClose').onclick = closeDrawer;
+$('mask').onclick = closeDrawer;
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeDrawer(); });
+
+// ============================================================ 启动
+async function boot(){
+  try{
+    const h = await fetch('/v1/health').then(r=>r.json());
+    $('brandVer').textContent = 'v'+h.version;
+    $('healthDot').className='dot';
+    $('healthTxt').textContent = '运行中 · '+(h.loopback_only?'仅本机':'内网');
+  }catch(e){
+    $('healthDot').className='dot bad';
+    $('healthTxt').textContent='连不上服务';
+  }
+  try{
+    const s = await api('/api/admin/session');
+    $('whoami').textContent = s.user || '（未启用登录）';
+  }catch(e){ /* api() 已处理 401 跳转 */ }
+
+  const p = new URLSearchParams(location.search).get('p');
+  go(PAGES[p] ? p : 'overview');
+
+  $('btnRefresh').onclick = ()=>{ render(); toast('已刷新'); };
+  $('btnLogout').onclick = async (e)=>{
+    e.preventDefault();
+    try{ await fetch('/logout',{method:'POST'}); }catch(_){}
+    location.href='/login';
+  };
+}
+boot();
+</script>
+</body>
+</html>

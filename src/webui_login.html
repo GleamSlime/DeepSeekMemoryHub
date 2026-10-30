@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · 蓝鲸记忆中枢</title>
+<style>
+  :root {
+    --bg:#0b0e14; --panel:#141a24; --line:#232c3b; --fg:#dbe4f0; --dim:#7b8798;
+    --accent:#3b82f6; --err:#ef4444;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body {
+    margin:0; background:var(--bg); color:var(--fg);
+    display:flex; align-items:center; justify-content:center;
+    font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    background-image:radial-gradient(ellipse 80% 60% at 50% -10%, #1a2740 0%, transparent 70%);
+  }
+  .box {
+    width:340px; background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:34px 30px 28px;
+    box-shadow:0 20px 60px rgba(0,0,0,.5);
+  }
+  .logo { text-align:center; font-size:34px; line-height:1; margin-bottom:12px; }
+  h1 { font-size:17px; text-align:center; margin:0 0 4px; font-weight:600; letter-spacing:.5px; }
+  .sub { text-align:center; color:var(--dim); font-size:12.5px; margin-bottom:24px; }
+  label { display:block; font-size:12.5px; color:var(--dim); margin:0 0 6px; }
+  input {
+    width:100%; background:#0d1219; border:1px solid var(--line); color:var(--fg);
+    padding:10px 12px; border-radius:8px; font-size:14px; margin-bottom:15px;
+    font-family:inherit;
+  }
+  input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(59,130,246,.15); }
+  button {
+    width:100%; background:var(--accent); border:0; color:#fff; padding:11px;
+    border-radius:8px; font-size:14px; font-weight:500; cursor:pointer; font-family:inherit;
+  }
+  button:hover { background:#4b8ef7; }
+  button:active { transform:translateY(1px); }
+  .err {
+    background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.35);
+    color:#fca5a5; padding:9px 12px; border-radius:8px; font-size:12.5px;
+    margin-bottom:16px; text-align:center;
+  }
+  .foot { text-align:center; color:#4b5563; font-size:11.5px; margin-top:20px; }
+</style>
+</head>
+<body>
+<form class="box" method="post" action="/login">
+  <div class="logo">🐋</div>
+  <h1>蓝鲸记忆中枢</h1>
+  <div class="sub">跨渠道 AI 记忆管理后台</div>
+  <div class="err" id="err" style="display:none">用户名或口令不正确</div>
+  <label for="u">用户名</label>
+  <input id="u" name="user" autocomplete="username" autofocus required>
+  <label for="p">口令</label>
+  <input id="p" name="pass" type="password" autocomplete="current-password" required>
+  <button type="submit">登 录</button>
+  <div class="foot">会话有效期 8 小时 · 关闭浏览器不会自动登出</div>
+</form>
+<script>
+  // 纯表单提交，不依赖 JavaScript——一个需要 JS 才能渲染的登录框，
+  // 在最需要它的时候（前端出错）恰好用不了。
+  if (location.search.includes('e=1')) document.getElementById('err').style.display = 'block';
+</script>
+</body>
+</html>

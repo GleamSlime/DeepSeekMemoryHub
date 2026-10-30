@@ -1,0 +1,21 @@
+# 构建产物
+/target
+/dist
+*.dmg
+
+# 运行时数据：API token、面板口令、记忆库、快照、日志都在 data/ 下。
+# 这是别人的真实记忆，**绝不入库**。
+/data/
+/backups
+*.log
+
+# 本项目把 CARGO_HOME 放在仓库内（约 140 MB），不能提交
+/.cargo_home/
+
+# SQLite
+*.db
+*.db-wal
+*.db-shm
+
+# 系统
+.DS_Store

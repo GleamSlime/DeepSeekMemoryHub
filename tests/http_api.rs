@@ -2527,3 +2527,122 @@ async fn 新增的消息删除路由不抢已读接口() {
         .unwrap();
     assert_eq!(list[0]["consumed"], 1);
 }
+
+// ================================================================== 称呼归一
+
+fn seed_person_scene(s: &TestServer, pid: &str, display: &str, scenes: &[(&str, &str)]) {
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms)
+             VALUES (?1, ?2, 'confirmed', 1)",
+            rusqlite::params![pid, display],
+        )?;
+        for (scene, name) in scenes {
+            tx.execute(
+                "INSERT INTO person_scene(person_id, scene, name, updated_ms)
+                 VALUES (?1, ?2, ?3, 1)",
+                rusqlite::params![pid, scene, name],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn 回复里的场景称呼会被换成身份显示名() {
+    let s = TestServer::start().await;
+    // 一个人两种场景叫法；另一个人的 QQ 群名片与此无关，不该被连带替换。
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms)
+             VALUES ('p1','姆姆','confirmed',1)",
+            [],
+        )?;
+        for (scene, name) in [("mc", "GleamSlime"), ("qq_group", "啥子猫")] {
+            tx.execute(
+                "INSERT INTO person_scene(person_id, scene, name, updated_ms)
+                 VALUES ('p1', ?1, ?2, 1)",
+                rusqlite::params![scene, name],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let r = s
+        .post(
+            "/v1/name/normalize",
+            serde_json::json!({"text": "啥子猫说得对，GleamSlime 也在"}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["text"], "姆姆说得对，姆姆 也在");
+    let reps = j["replacements"].as_array().unwrap();
+    assert_eq!(reps.len(), 2, "两条替换都应报告：{j}");
+    assert!(reps
+        .iter()
+        .any(|x| x["from"] == "啥子猫" && x["to"] == "姆姆"));
+}
+
+#[tokio::test]
+async fn 称呼归一可以只看一个场景() {
+    let s = TestServer::start().await;
+    seed_person_scene(
+        &s,
+        "p1",
+        "姆姆",
+        &[("mc", "GleamSlime"), ("qq_group", "啥子猫")],
+    );
+
+    let r = s
+        .post(
+            "/v1/name/normalize",
+            serde_json::json!({"text": "啥子猫和 GleamSlime", "scene": "qq_group"}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["text"], "姆姆和 GleamSlime", "只替换该场景的称呼");
+}
+
+#[tokio::test]
+async fn 称呼归一拒绝未知场景空文本与未登录() {
+    let s = TestServer::start().await;
+    let r = s
+        .post(
+            "/v1/name/normalize",
+            serde_json::json!({"text": "x", "scene": "telegram"}),
+        )
+        .await;
+    assert_eq!(r.status(), 400);
+
+    let r = s
+        .post("/v1/name/normalize", serde_json::json!({"text": "   "}))
+        .await;
+    assert_eq!(r.status(), 400);
+
+    let r = s
+        .post_no_auth("/v1/name/normalize", serde_json::json!({"text": "啥子猫"}))
+        .await;
+    assert_eq!(r.status(), 401);
+}
+
+#[tokio::test]
+async fn 同一个称呼指向两个人时不替换() {
+    let s = TestServer::start().await;
+    seed_person_scene(&s, "p1", "甲", &[("qq_group", "同名")]);
+    seed_person_scene(&s, "p2", "乙", &[("qq_group", "同名")]);
+
+    let r = s
+        .post(
+            "/v1/name/normalize",
+            serde_json::json!({"text": "同名在这"}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["text"], "同名在这", "有歧义时宁可不动，不能张冠李戴");
+    assert!(j["replacements"].as_array().unwrap().is_empty());
+}

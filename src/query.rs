@@ -976,6 +976,99 @@ pub fn relations(db: &Db) -> Result<Vec<RelationItem>> {
     })
 }
 
+// ------------------------------------------------------------------ 称呼归一
+
+/// 一条称呼映射：某个场景里的名字 → 身份显示名。
+#[derive(Debug, Clone)]
+pub struct NameMapping {
+    pub from: String,
+    pub to: String,
+}
+
+/// 收集「场景称呼 → 身份显示名」的映射。
+///
+/// 用途：模型在 QQ 群里看到的是群名片（「啥子猫」），而记忆与人格里用的是
+/// 身份显示名（「姆姆」）。回复里出现场景名时，由调用方在发送前统一改成
+/// 显示名，避免同一个人在同一段话里有两个名字。
+///
+/// 规则：
+/// - 只收 2 个字以上的称呼（单字替换几乎一定是误伤）；
+/// - 称呼等于显示名的不收（替换没有意义）；
+/// - 同一个人对同一场景有人工值时用人工值，否则用自动推导值；
+/// - **同一个称呼指向两个不同的人时整条丢弃**（宁可漏替换，不能张冠李戴）。
+pub fn name_mappings(db: &Db, scene: Option<&str>) -> Result<Vec<NameMapping>> {
+    db.with_read(|c| {
+        let mut persons: Vec<(String, String)> = Vec::new();
+        {
+            let mut stmt = c.prepare("SELECT person_id, display_name FROM person")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                persons.push(row?);
+            }
+        }
+        let data = load_scene_data(c)?;
+
+        // alias → Some(显示名) 或 None（冲突，丢弃）
+        let mut map: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for (pid, display) in persons {
+            for s in scenes_for(&pid, &data) {
+                if let Some(want) = scene {
+                    if s.scene != want {
+                        continue;
+                    }
+                }
+                let Some(name) = s.name else { continue };
+                let name = name.trim().to_string();
+                if name.chars().count() < 2 || name == display {
+                    continue;
+                }
+                match map.get(&name) {
+                    None => {
+                        map.insert(name, Some(display.clone()));
+                    }
+                    Some(Some(other)) if *other != display => {
+                        map.insert(name, None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut out: Vec<NameMapping> = map
+            .into_iter()
+            .filter_map(|(from, to)| to.map(|to| NameMapping { from, to }))
+            .collect();
+        // 长名字先替换：避免「啥子猫」被「啥子」先吃掉一部分。
+        out.sort_by_key(|m| std::cmp::Reverse(m.from.chars().count()));
+        Ok(out)
+    })
+}
+
+/// 把文本里的场景称呼替换成身份显示名。
+///
+/// 返回 `(新文本, [(原称呼, 显示名, 次数)])`。纯函数，方便单测。
+pub fn replace_names(
+    text: &str,
+    mappings: &[NameMapping],
+) -> (String, Vec<(String, String, usize)>) {
+    let mut out = text.to_string();
+    let mut hits = Vec::new();
+    // 这里再排一次：调用方忘了排序时，短名字会先吃掉长名字的一部分
+    // （「啥子猫」被「啥子」改成「X猫」），而那种错很难在测试里察觉。
+    let mut ordered: Vec<&NameMapping> = mappings.iter().collect();
+    ordered.sort_by_key(|m| std::cmp::Reverse(m.from.chars().count()));
+    for m in ordered {
+        let n = out.matches(&m.from).count();
+        if n > 0 {
+            out = out.replace(&m.from, &m.to);
+            hits.push((m.from.clone(), m.to.clone(), n));
+        }
+    }
+    (out, hits)
+}
+
 /// 亲密度 → 中文阶段。阈值与 Java 侧一致（0/20/40/70/90）。
 fn closeness_stage(c: i64) -> String {
     match c {
@@ -1162,6 +1255,30 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let db = Db::open(d.path().join("t.db")).unwrap();
         (d, db)
+    }
+
+    #[test]
+    fn 称呼替换的边界规则() {
+        // 纯函数：不发请求也能锁住「短名字不动、同名不动、长名字先换」。
+        let m = |a: &str, b: &str| NameMapping {
+            from: a.into(),
+            to: b.into(),
+        };
+        let (out, hits) = replace_names(
+            "小明和小明明都在，啥子猫也在",
+            &[m("啥子猫", "姆姆"), m("小明", "明明")],
+        );
+        assert_eq!(out, "明明和明明明都在，姆姆也在");
+        assert_eq!(hits.len(), 2);
+
+        // 长名字优先：先换「啥子猫」，再换「啥子」也不会把已换掉的部分再动一次。
+        let (out, _) = replace_names("啥子猫", &[m("啥子", "X"), m("啥子猫", "姆姆")]);
+        assert_eq!(out, "姆姆");
+
+        // 没有命中就不该报告。
+        let (out, hits) = replace_names("无关文本", &[m("啥子猫", "姆姆")]);
+        assert_eq!(out, "无关文本");
+        assert!(hits.is_empty());
     }
 
     fn seed(db: &Db, n: usize, channel: &str) {

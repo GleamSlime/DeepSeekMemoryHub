@@ -293,6 +293,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/plan/{id}", get(get_plan))
         .route("/v1/person/bind", post(bind_person))
         .route("/v1/person/pending", get(pending_persons))
+        .route("/v1/name/normalize", post(normalize_names))
         .route("/v1/snapshot", post(take_snapshot))
         .route("/v1/snapshot/list", get(list_snapshots))
         .route("/v1/rollback", post(do_rollback))
@@ -2306,6 +2307,77 @@ async fn pending_persons(
     .await
     .map_err(|e| Error::Storage(format!("查询任务失败：{e}")))??;
     Ok(Json(rows))
+}
+
+// ------------------------------------------------------------------ 称呼归一
+
+#[derive(Deserialize)]
+struct NormalizeNamesBody {
+    text: String,
+    /// 只看这个场景的称呼（mc / qq / qq_group / live）。省略 = 全部场景。
+    scene: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NameReplacementOut {
+    from: String,
+    to: String,
+    count: usize,
+}
+
+#[derive(Serialize)]
+struct NormalizeNamesOut {
+    ok: bool,
+    text: String,
+    replacements: Vec<NameReplacementOut>,
+}
+
+/// 把回复文本里的「场景称呼」替换成身份显示名。
+///
+/// 为什么要在中枢做：场景称呼（QQ 群名片、MC 名、直播间昵称）只有中枢知道，
+/// 调用方（AstrBot / MC 插件）拿不到这张表。调用方拿到回复后调一次，
+/// 发送前把名字统一成显示名即可；中枢本身不生成文本，也不拦消息。
+///
+/// 例：身份显示名「姆姆」，QQ 群名片「啥子猫」→
+/// `{"text":"啥子猫说得对","scene":"qq_group"}` → `{"text":"姆姆说得对"}`。
+async fn normalize_names(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(b): Json<NormalizeNamesBody>,
+) -> ApiResult<NormalizeNamesOut> {
+    check_token(&st, &headers)?;
+    if b.text.trim().is_empty() {
+        return Err(Error::BadRequest("text 不能为空".into()));
+    }
+    if b.text.chars().count() > 4000 {
+        return Err(Error::BadRequest("text 太长（上限 4000 字）".into()));
+    }
+    let scene = b.scene.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(scene) = scene {
+        if !crate::query::is_person_scene(scene) {
+            return Err(Error::BadRequest(format!(
+                "未知场景：{scene}（只能是 mc / qq / qq_group / live）"
+            )));
+        }
+    }
+    let scene = scene.map(str::to_string);
+
+    let db = st.db.clone();
+    let (text, hits) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mappings = crate::query::name_mappings(&db, scene.as_deref())?;
+        Ok(crate::query::replace_names(&b.text, &mappings))
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("称呼归一失败：{e}")))??;
+
+    Ok(Json(NormalizeNamesOut {
+        ok: true,
+        text,
+        replacements: hits
+            .into_iter()
+            .map(|(from, to, count)| NameReplacementOut { from, to, count })
+            .collect(),
+    }))
 }
 
 // ------------------------------------------------------------------ 快照与回滚

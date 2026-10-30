@@ -1812,6 +1812,19 @@ async fn get_context(
             Err(e) => notes.push(format!("memory: 读取失败（{e}）")),
         }
 
+        // -------- 2.4 称呼对照（只在本轮这句话提到某个人时出现）
+        //
+        // 为什么不把所有身份都列出来：上下文每轮都发，整张 person 表既费 token，
+        // 也会让模型把不相干的人扯进来。触发词就是这句话里出现的名字
+        // （显示名或任一场景称呼，≥2 字且无歧义）。
+        match crate::query::persons_mentioned(&db, &needle, 3) {
+            Ok(rows) => push(
+                crate::context::render_names(&rows),
+                crate::context::SEG_NAMES,
+            ),
+            Err(e) => notes.push(format!("names: 读取失败（{e}）")),
+        }
+
         // -------- 2.5 知识库（查到的资料，**不是**亲历）
         //
         // 放在 memory 之后、events 之前：问到一个事实性问题时，

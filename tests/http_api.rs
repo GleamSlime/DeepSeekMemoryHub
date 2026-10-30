@@ -2646,3 +2646,69 @@ async fn 同一个称呼指向两个人时不替换() {
     assert_eq!(j["text"], "同名在这", "有歧义时宁可不动，不能张冠李戴");
     assert!(j["replacements"].as_array().unwrap().is_empty());
 }
+
+// ================================================================== 上下文里的称呼对照
+
+fn seed_named_person(s: &TestServer) {
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms)
+             VALUES ('p1','姆姆','confirmed',1)",
+            [],
+        )?;
+        for (scene, name) in [("mc", "GleamSlime"), ("qq_group", "啥子猫")] {
+            tx.execute(
+                "INSERT INTO person_scene(person_id, scene, name, updated_ms)
+                 VALUES ('p1',?1,?2,1)",
+                rusqlite::params![scene, name],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn 上下文只在提到某个人时带称呼对照() {
+    let s = TestServer::start().await;
+    seed_named_person(&s);
+
+    // 提到显示名 → 出现 names 段，并给出别的叫法
+    let r = s.get("/v1/context?q=姆姆今天在吗").await;
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    let parts = j["parts"].as_array().unwrap();
+    assert!(parts.iter().any(|p| p == "names"), "应出现 names 段：{j}");
+    let text = j["text"].as_str().unwrap();
+    assert!(text.contains("啥子猫"), "应给出群名片：{text}");
+
+    // 提到场景称呼 → 同样能对上
+    let r = s.get("/v1/context?q=啥子猫呢").await;
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert!(j["parts"].as_array().unwrap().iter().any(|p| p == "names"));
+
+    // 没提到任何人 → 不出现（不能把所有身份都塞进去）
+    let r = s.get("/v1/context?q=今天天气不错").await;
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert!(!j["parts"].as_array().unwrap().iter().any(|p| p == "names"));
+    assert!(!j["text"].as_str().unwrap().contains("啥子猫"));
+
+    // 空 q → 也不出现
+    let r = s.get("/v1/context").await;
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert!(!j["parts"].as_array().unwrap().iter().any(|p| p == "names"));
+}
+
+#[tokio::test]
+async fn 歧义称呼不会把人带进上下文() {
+    let s = TestServer::start().await;
+    seed_person_scene(&s, "p1", "甲", &[("qq_group", "同名")]);
+    seed_person_scene(&s, "p2", "乙", &[("qq_group", "同名")]);
+
+    let r = s.get("/v1/context?q=同名在这里").await;
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert!(
+        !j["parts"].as_array().unwrap().iter().any(|p| p == "names"),
+        "有歧义的称呼不能当触发词：{j}"
+    );
+}

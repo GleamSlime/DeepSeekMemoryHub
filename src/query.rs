@@ -1046,6 +1046,83 @@ pub fn name_mappings(db: &Db, scene: Option<&str>) -> Result<Vec<NameMapping>> {
     })
 }
 
+/// 找出「这句话里提到的人」，返回 `(显示名, [(场景名, 该场景称呼)])`。
+///
+/// 只在这句话真的提到某个人（显示名或任一场景称呼，≥2 字）时才返回他 ——
+/// 调用方据此往上下文里加一小段「称呼对照」，而不是把所有人的关系都塞进去。
+/// 同一个名字指向两个人时视为歧义、不作为触发词（与 `name_mappings` 同一套口径）。
+pub type PersonNames = (String, Vec<(String, String)>);
+
+pub fn persons_mentioned(db: &Db, text: &str, limit: usize) -> Result<Vec<PersonNames>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let lower = trimmed.to_lowercase();
+
+    db.with_read(|c| {
+        let mut persons: Vec<(String, String)> = Vec::new();
+        {
+            let mut stmt =
+                c.prepare("SELECT person_id, display_name FROM person ORDER BY created_ms")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                persons.push(row?);
+            }
+        }
+        let data = load_scene_data(c)?;
+
+        // 名字（小写）→ 人。冲突的名字记 None，不参与触发。
+        let mut owner: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for (pid, display) in &persons {
+            let mut names: Vec<String> = vec![display.clone()];
+            names.extend(scenes_for(pid, &data).into_iter().filter_map(|s| s.name));
+            for name in names {
+                let name = name.trim().to_lowercase();
+                if name.chars().count() < 2 {
+                    continue;
+                }
+                match owner.get(&name) {
+                    None => {
+                        owner.insert(name, Some(pid.clone()));
+                    }
+                    Some(Some(other)) if other != pid => {
+                        owner.insert(name, None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        for (pid, display) in persons {
+            let scenes = scenes_for(&pid, &data);
+            let mut names: Vec<String> = vec![display.clone()];
+            names.extend(scenes.iter().filter_map(|s| s.name.clone()));
+            let hit = names.iter().any(|n| {
+                let n = n.trim().to_lowercase();
+                n.chars().count() >= 2
+                    && owner.get(&n).and_then(|o| o.as_ref()) == Some(&pid)
+                    && lower.contains(&n)
+            });
+            if !hit {
+                continue;
+            }
+            let aliases: Vec<(String, String)> = scenes
+                .iter()
+                .filter_map(|s| s.name.clone().map(|n| (s.label.clone(), n)))
+                .collect();
+            out.push((display, aliases));
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    })
+}
+
 /// 把文本里的场景称呼替换成身份显示名。
 ///
 /// 返回 `(新文本, [(原称呼, 显示名, 次数)])`。纯函数，方便单测。

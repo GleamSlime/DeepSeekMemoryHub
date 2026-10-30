@@ -39,6 +39,9 @@ pub const SEG_EVENTS: &str = "events";
 pub const SEG_GROUP: &str = "group";
 pub const SEG_DIARY: &str = "diary";
 pub const SEG_MOOD: &str = "mood";
+/// 称呼对照。**只在当前这句话里提到某个人时**才出现——
+/// 把全部身份一股脑塞进上下文，既费 token 又会让模型把不相干的人扯进来。
+pub const SEG_NAMES: &str = "names";
 
 /// 段落之间的分隔。空一行，让 markdown 读起来是分节的。
 const SEP: &str = "\n\n";
@@ -419,6 +422,32 @@ pub fn render_kb(rows: &[(Option<String>, String)]) -> Option<String> {
 ///
 /// 这里**不再排序**：顺序由检索层给（命中优先、权重次之），
 /// 重排会让「为什么这条排在前面」这件事变得没法解释。
+/// 「称呼对照」段：只列出**这句话里提到的人**的各种叫法。
+///
+/// 输入 `(显示名, [(场景名, 该场景称呼)])`，场景名用「QQ 群叫」「MC 里叫」这种口语。
+/// 没有任何别名（所有场景都等于显示名）时该行省略；整段为空就返回 None。
+pub fn render_names(rows: &[(String, Vec<(String, String)>)]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for (display, aliases) in rows {
+        let parts: Vec<String> = aliases
+            .iter()
+            .filter(|(_, name)| !name.trim().is_empty() && name != display)
+            .map(|(label, name)| format!("{label}叫「{name}」"))
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        lines.push(format!("- {display}：{}", parts.join("、")));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "# 称呼对照\n同一个人在不同地方叫法不同，别当成两个人：\n{}",
+        lines.join("\n")
+    ))
+}
+
 pub fn render_memory(rows: &[String]) -> Option<String> {
     let lines: Vec<String> = rows
         .iter()
@@ -437,6 +466,32 @@ pub fn render_memory(rows: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 称呼对照只列有别名的人() {
+        let rows = vec![
+            (
+                "姆姆".to_string(),
+                vec![
+                    ("QQ 群".to_string(), "啥子猫".to_string()),
+                    ("MC 里".to_string(), "GleamSlime".to_string()),
+                    ("直播间".to_string(), "姆姆".to_string()), // 等于显示名，不该出现
+                ],
+            ),
+            (
+                "路人".to_string(),
+                vec![("QQ 群".to_string(), "路人".to_string())], // 全是同名 → 整人省略
+            ),
+        ];
+        let out = render_names(&rows).unwrap();
+        assert!(out.contains("姆姆"));
+        assert!(out.contains("啥子猫"));
+        assert!(out.contains("GleamSlime"));
+        assert!(!out.contains("路人"), "没有别的叫法的人不该占一行");
+        assert_eq!(out.matches("姆姆").count(), 1, "等于显示名的别名要滤掉");
+
+        assert!(render_names(&[]).is_none());
+    }
 
     fn seg(name: &'static str, text: &str) -> Segment {
         Segment {

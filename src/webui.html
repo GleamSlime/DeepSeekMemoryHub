@@ -2009,15 +2009,24 @@ async function renderPromises(c){
   const stBadge = s => ({
     open:'b-warn', kept:'b-ok', broken:'b-err', abandoned:'b-extracted'
   }[s] || 'b-extracted');
-  c.innerHTML = `<div class="tablewrap"><table><thead><tr>
-    <th>内容</th><th>状态</th><th>约定时间</th><th>创建</th><th>卡住原因</th></tr></thead>
+  c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
+    它答应过的事。写记忆时中枢会**自动从台词里认出承诺**（「我明天帮你…」），
+    也可以由接入方直接 POST。
+  </p>
+  <div class="tablewrap"><table><thead><tr>
+    <th>内容</th><th>状态</th><th>约定时间</th><th>创建</th><th>卡住原因</th><th style="width:80px"></th></tr></thead>
   <tbody>${d.items.map(p=>`<tr>
     <td>${esc(p.description)}</td>
     <td><span class="badge ${stBadge(p.status)}">${esc(p.status)}</span></td>
     <td class="mono dim nowrap">${p.due_ms?fmtTime(p.due_ms):'—'}</td>
     <td class="mono dim nowrap">${fmtAgo(p.created_ms)}</td>
-    <td class="dim">${esc(p.blocked_reason||'—')}</td></tr>`).join('')}</tbody>
+    <td class="dim">${esc(p.blocked_reason||'—')}</td>
+    <td><button class="chip" data-promise-del="${esc(p.id)}">删除</button></td></tr>`).join('')}</tbody>
   </table></div>`;
+
+  c.querySelectorAll('[data-promise-del]').forEach(el=>{
+    el.onclick=()=>confirmDelete(`/v1/promise/${encodeURIComponent(el.dataset.promiseDel)}`, '这条承诺');
+  });
 }
 
 // ---------- 注入回放

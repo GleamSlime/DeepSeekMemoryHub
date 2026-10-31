@@ -141,7 +141,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/relation/list", get(list_relations))
         // 承诺
         .route("/v1/promise", post(post_promise))
-        .route("/v1/promise/{id}", patch(patch_promise))
+        .route(
+            "/v1/promise/{id}",
+            patch(patch_promise).delete(delete_promise),
+        )
         .route("/v1/promise/list", get(list_promises))
         // 特质
         .route("/v1/trait", post(put_trait))
@@ -279,6 +282,56 @@ async fn post_promise(
     .await
     .map_err(|e| Error::Storage(e.to_string()))??;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 删一条承诺（逻辑删除，可回滚）。
+///
+/// 之前只有 `POST` 和 `PATCH` —— 于是「记错了一条承诺」只能留着，
+/// 面板上也没法清理。误记的承诺比没记更糟：它会一直挂在上下文里，
+/// 变成一个根本没答应过的义务。
+async fn delete_promise(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: Option<Json<DeleteNote>>,
+) -> A<serde_json::Value> {
+    crate::http::check_token(&st, &headers)?;
+    let note = body.and_then(|b| b.note.clone());
+    let db = st.db.clone();
+    let id2 = id.clone();
+    let n = tokio::task::spawn_blocking(move || -> Result<usize> {
+        db.with_write(|tx| {
+            let now = now_ms();
+            let log = tx.execute(
+                "INSERT INTO rollback_log(at_ms, target_ms, mode, affected_json, note)
+                 VALUES (?1, ?1, 'delete', ?2, ?3)",
+                rusqlite::params![
+                    now,
+                    format!("[\"{id2}\"]"),
+                    note.unwrap_or_else(|| "删除单条承诺".into())
+                ],
+            )?;
+            let log_id = tx.last_insert_rowid();
+            let _ = log;
+            let n = tx.execute(
+                "UPDATE promise SET deleted_by = ?1, updated_ms = ?2
+                 WHERE id = ?3 AND deleted_by IS NULL",
+                rusqlite::params![log_id, now, id2],
+            )?;
+            Ok(n)
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    if n == 0 {
+        return Err(Error::NotFound(format!("承诺 {id}")));
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+#[derive(Deserialize)]
+struct DeleteNote {
+    note: Option<String>,
 }
 
 #[derive(Deserialize)]

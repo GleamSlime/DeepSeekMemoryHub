@@ -25,6 +25,7 @@ pub mod kb;
 pub mod legacy_api;
 pub mod migrate;
 pub mod model;
+pub mod promise_detect;
 pub mod query;
 pub mod rank;
 pub mod rollback;

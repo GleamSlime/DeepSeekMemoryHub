@@ -3559,3 +3559,108 @@ async fn 没有配人格时上下文不受影响() {
         "没人格就不该有这一段：{j}"
     );
 }
+
+// ================================================================== 承诺自动生成
+
+#[tokio::test]
+async fn 事件里说了承诺就自动落一条() {
+    let s = TestServer::start().await;
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({
+                "channel":"mc","kind":"chat",
+                "summary":"我明天帮你把那段墙垒完。",
+                "person_id":"p1","dedup_key":"pr-1"
+            }),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+
+    let (desc, status, due): (String, String, Option<i64>) =
+        s.db.with_read(|c| {
+            Ok(c.query_row(
+                "SELECT description, status, due_ms FROM promise ORDER BY created_ms DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(desc, "我明天帮你把那段墙垒完。");
+    assert_eq!(status, "open");
+    assert!(due.is_some(), "「明天」应抽出一个截止时间");
+    let person: Option<String> = s
+        .db
+        .with_read(|c| Ok(c.query_row("SELECT person_id FROM promise LIMIT 1", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(person.as_deref(), Some("p1"), "承诺要挂到涉及的人身上");
+}
+
+#[tokio::test]
+async fn 闲聊和否定不会生成承诺() {
+    let s = TestServer::start().await;
+    for (i, text) in [
+        "今天天气不错。",
+        "我不会帮你做的。",
+        "我可能去看看。",
+        "你昨天挖到什么了？",
+    ]
+    .iter()
+    .enumerate()
+    {
+        s.post(
+            "/v1/event",
+            serde_json::json!({
+                "channel":"mc","kind":"chat","summary":text,
+                "dedup_key":format!("nopr-{i}")
+            }),
+        )
+        .await;
+    }
+    let n: i64 =
+        s.db.with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM promise", [], |r| r.get(0))?))
+            .unwrap();
+    assert_eq!(n, 0, "这些都不该被认成承诺");
+}
+
+#[tokio::test]
+async fn 承诺可以逻辑删除() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO promise(id, description, status, created_ms, updated_ms)
+             VALUES ('pr1','答应过的事','open',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let r = TestServer::client()
+        .delete(format!("{}/v1/promise/pr1", s.base))
+        .header("x-api-token", TOKEN)
+        .json(&serde_json::json!({"note":"记错了"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // 列表里不再出现（deleted_by 过滤）
+    let j: serde_json::Value = s.get("/v1/promise/list").await.json().await.unwrap();
+    assert!(
+        j.as_array().unwrap().is_empty(),
+        "删掉的承诺不该在列表里：{j}"
+    );
+
+    // 但数据还在（逻辑删除，可回滚）
+    let n: i64 =
+        s.db.with_read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM promise WHERE deleted_by IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(n, 1, "逻辑删除要保留数据");
+}

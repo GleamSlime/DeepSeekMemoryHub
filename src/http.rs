@@ -796,8 +796,19 @@ async fn post_event(
         }
     };
 
+    // 从这句话里认出承诺，落一条 `promise`。
+    //
+    // 为什么在服务端做：MC 侧只有模型**主动调** `promise{action:make}` 才会写，
+    // 而提示词里没引导过它这么做 —— 跑了几天一条都没有。
+    // 「答应」本来是语言行为：说了就成立，不该依赖模型多做一次自我标注。
+    // 识别规则刻意保守（见 `promise_detect` 的注释）：宁可漏，不可把
+    // 「我明天可能去看看」记成义务。
+    let detected_promise = crate::promise_detect::detect(&summary, now_ms());
+
     let at = body.at_ms.unwrap_or_else(now_ms);
     let scope = Scope::parse(&body.scope);
+    // 承诺要挂到人身上，而 body 稍后会被 move 进闭包 —— 提前取出来。
+    let body_person_for_promise = body.person_id.clone();
     let db = st.db.clone();
     // 空串幂等键必须归一成 NULL：见 `normalize_key` 的说明，
     // 否则第一条 `dedup_key:""` 会永久吞掉之后所有同字段事件。
@@ -840,8 +851,27 @@ async fn post_event(
                     importance_reason,
                 ],
             )?;
+            let new_id = tx.last_insert_rowid();
+            // 同一事务里落承诺：要么一起成，要么一起不成 ——
+            // 半条事件配半条承诺比没有更糟。
+            if let Some(det) = &detected_promise {
+                let pid = format!("pr-{}-{}", now_ms(), rand_suffix());
+                tx.execute(
+                    "INSERT INTO promise(id, person_id, description, status,
+                                         created_ms, due_ms, updated_ms)
+                     VALUES (?1,?2,?3,'open',?4,?5,?4)",
+                    rusqlite::params![
+                        pid,
+                        body_person_for_promise,
+                        det.description,
+                        now_ms(),
+                        det.due_ms
+                    ],
+                )?;
+                tracing::info!("自动记下一条承诺：{}", det.description);
+            }
             Ok(WriteResult {
-                id: Some(tx.last_insert_rowid()),
+                id: Some(new_id),
                 duplicate: false,
             })
         })

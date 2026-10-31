@@ -1338,3 +1338,121 @@ async fn 忽视开关能开能关并且影响写入() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+// ================================================================== 人格
+
+#[tokio::test]
+async fn 人格按模型正则匹配() {
+    let s = S::start().await;
+    let ck = s.login().await;
+
+    // 一条只匹配 flash 的，一条兜底
+    for (name, re, body, prio) in [
+        (
+            "flash 版",
+            "deepseek.*flash",
+            "你是小模型版，句子要更短。",
+            10,
+        ),
+        ("兜底", "", "你是兜底人格。", 100),
+    ] {
+        let r = S::client()
+            .post(format!("{}/api/admin/personas", s.base))
+            .header("cookie", &ck)
+            .json(&serde_json::json!({"name":name,"model_regex":re,"body":body,"priority":prio}))
+            .send()
+            .await
+            .unwrap();
+        let st = r.status();
+        let body = r.text().await.unwrap_or_default();
+        assert_eq!(st, 200, "创建人格失败：{body}");
+    }
+
+    // flash 模型 → 命中专用那条
+    let j: serde_json::Value = s
+        .get_with("/api/admin/persona/preview?model=deepseek-v4.1-flash", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["matched"]["name"], "flash 版", "{j}");
+
+    // 其它模型 → 兜底（**即使兜底 priority=100 也不能盖住精确匹配**）
+    let j: serde_json::Value = s
+        .get_with("/api/admin/persona/preview?model=gpt-4o", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["matched"]["name"], "兜底");
+
+    // 不传模型 id → 只命中兜底
+    let j: serde_json::Value = s
+        .get_with("/api/admin/persona/preview", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["matched"]["name"], "兜底");
+}
+
+#[tokio::test]
+async fn 人格写坏的正则会被拒绝() {
+    let s = S::start().await;
+    let ck = s.login().await;
+    let r = S::client()
+        .post(format!("{}/api/admin/personas", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({
+            "name":"坏正则","model_regex":"[unclosed","body":"x"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "写坏的正则存进去就等于这条永远不生效");
+}
+
+#[tokio::test]
+async fn 人格可以停用和删除() {
+    let s = S::start().await;
+    let ck = s.login().await;
+    let r = S::client()
+        .post(format!("{}/api/admin/personas", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({
+            "name":"临时","model_regex":"x","body":"y","priority":5
+        }))
+        .send()
+        .await
+        .unwrap();
+    let id = r.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 停用后不再被选中
+    let r = S::client()
+        .patch(format!("{}/api/admin/personas/{id}", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"enabled": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = s
+        .get_with("/api/admin/persona/preview?model=x", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(j["matched"].is_null(), "停用的人格不该被选中：{j}");
+
+    // 删除
+    let r = S::client()
+        .delete(format!("{}/api/admin/personas/{id}", s.base))
+        .header("cookie", &ck)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}

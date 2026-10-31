@@ -73,6 +73,15 @@ pub fn router(state: AdminState) -> Router {
             get(api_channels).post(api_create_channel),
         )
         .route(
+            "/api/admin/personas",
+            get(api_personas).post(api_create_persona),
+        )
+        .route(
+            "/api/admin/personas/{id}",
+            axum::routing::patch(api_patch_persona).delete(api_delete_persona),
+        )
+        .route("/api/admin/persona/preview", get(api_persona_preview))
+        .route(
             "/api/admin/channels/{tag}",
             axum::routing::patch(api_patch_channel).delete(api_delete_channel),
         )
@@ -918,6 +927,203 @@ async fn api_patch_relation(
     .map_err(|e| Error::Storage(format!("编辑关系失败：{e}")))??;
 
     Ok(Json(serde_json::json!({ "ok": true, "person_id": id })))
+}
+
+async fn api_personas(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<Vec<query::PersonaItem>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::personas(&db))
+        .await
+        .map_err(|e| Error::Storage(format!("人格查询失败：{e}")))??;
+    Ok(Json(items))
+}
+
+#[derive(Deserialize)]
+struct NewPersona {
+    name: String,
+    #[serde(default)]
+    model_regex: String,
+    body: String,
+    #[serde(default)]
+    priority: i64,
+    #[serde(default = "yes")]
+    enabled: bool,
+    note: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// 校验正则能编译。存进去一条写坏的正则，等于这条人格永远不生效 ——
+/// 而面板上看起来一切正常，这是最难查的一类配置错。
+fn check_regex(r: &str) -> Result<()> {
+    let t = r.trim();
+    if t.is_empty() {
+        return Ok(()); // 空 = 兜底，合法
+    }
+    regex::Regex::new(t).map_err(|e| Error::BadRequest(format!("正则不合法：{e}")))?;
+    Ok(())
+}
+
+async fn api_create_persona(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(b): Json<NewPersona>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let name = b.name.trim().to_string();
+    if name.is_empty() {
+        return Err(Error::BadRequest("名字不能为空".into()));
+    }
+    if b.body.trim().is_empty() {
+        return Err(Error::BadRequest("人格正文不能为空".into()));
+    }
+    check_regex(&b.model_regex)?;
+
+    // id 必须带随机后缀：只靠毫秒的话，同一毫秒里建两条就撞主键
+    // （面板上连点两次「新增」，或者脚本批量导入时很容易发生）。
+    let id = format!("per-{}-{}", crate::db::now_ms(), crate::http::rand_suffix());
+    let db = st.app.db.clone();
+    let id2 = id.clone();
+    let body = b.body.clone();
+    let name2 = name.clone();
+    let re = b.model_regex.trim().to_string();
+    let note = b.note.clone();
+    let prio = b.priority;
+    let enabled = b.enabled;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let now = crate::db::now_ms();
+            tx.execute(
+                "INSERT INTO persona(id, name, model_regex, body, priority, enabled,
+                                     note, created_ms, updated_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)",
+                rusqlite::params![id2, name2, re, body, prio, enabled as i64, note, now],
+            )?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("新建人格失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+#[derive(Deserialize)]
+struct PersonaPatch {
+    name: Option<String>,
+    model_regex: Option<String>,
+    body: Option<String>,
+    priority: Option<i64>,
+    enabled: Option<bool>,
+    note: Option<String>,
+}
+
+async fn api_patch_persona(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(b): Json<PersonaPatch>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    if let Some(r) = &b.model_regex {
+        check_regex(r)?;
+    }
+    if let Some(v) = &b.body {
+        if v.trim().is_empty() {
+            return Err(Error::BadRequest("人格正文不能为空".into()));
+        }
+    }
+    let db = st.app.db.clone();
+    let id2 = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM persona WHERE id = ?1",
+                rusqlite::params![id2],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("人格 {id2}")));
+            }
+            tx.execute(
+                "UPDATE persona SET
+                   name = COALESCE(?1, name),
+                   model_regex = COALESCE(?2, model_regex),
+                   body = COALESCE(?3, body),
+                   priority = COALESCE(?4, priority),
+                   enabled = COALESCE(?5, enabled),
+                   note = COALESCE(?6, note),
+                   updated_ms = ?7
+                 WHERE id = ?8",
+                rusqlite::params![
+                    b.name,
+                    b.model_regex.map(|s| s.trim().to_string()),
+                    b.body,
+                    b.priority,
+                    b.enabled.map(|x| x as i64),
+                    b.note,
+                    crate::db::now_ms(),
+                    id2
+                ],
+            )?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("编辑人格失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn api_delete_persona(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let n = tx.execute("DELETE FROM persona WHERE id = ?1", rusqlite::params![id])?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("人格 {id}")));
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("删除人格失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct PersonaPreview {
+    model: Option<String>,
+}
+
+/// 给定模型 id，返回**会命中哪一条**人格。面板上填完正则能立刻验。
+async fn api_persona_preview(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(q): Query<PersonaPreview>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let model = q.model.unwrap_or_default();
+    let m2 = model.clone();
+    let hit = tokio::task::spawn_blocking(move || query::pick_persona(&db, &m2))
+        .await
+        .map_err(|e| Error::Storage(format!("匹配失败：{e}")))??;
+    Ok(Json(serde_json::json!({
+        "model": model,
+        "matched": hit.as_ref().map(|p| serde_json::json!({
+            "id": p.id, "name": p.name, "model_regex": p.model_regex, "priority": p.priority,
+        })),
+        "body": hit.map(|p| p.body),
+    })))
 }
 
 async fn api_channels(

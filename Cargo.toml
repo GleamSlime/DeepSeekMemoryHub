@@ -30,6 +30,7 @@ sha2 = "0.10"
 # 不引 OpenSSL，交叉编译时才不会踩系统库的坑。
 # 实测代价：二进制净增约 2.4 MB（5.6 → 约 8 MB），见 docs/知识库接入方案.md §0。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+regex = "1.13.1"
 
 [dev-dependencies]
 tempfile = "3"

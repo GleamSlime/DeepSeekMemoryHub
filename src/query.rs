@@ -865,6 +865,86 @@ pub fn fact_hits_for(db: &Db, summary: &str) -> Result<usize> {
     })
 }
 
+// ------------------------------------------------------------------ 人格
+
+#[derive(Debug, Serialize)]
+pub struct PersonaItem {
+    pub id: String,
+    pub name: String,
+    pub model_regex: String,
+    pub body: String,
+    pub priority: i64,
+    pub enabled: bool,
+    pub note: Option<String>,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+    /// 正则能否编译。**存的时候校验，读的时候也要报** ——
+    /// 库里可能有历史上写坏的正则，静默跳过会让人以为「这条人格没生效」是别的原因。
+    pub regex_ok: bool,
+}
+
+pub fn personas(db: &Db) -> Result<Vec<PersonaItem>> {
+    db.with_read(|c| {
+        let mut stmt = c.prepare(
+            "SELECT id, name, model_regex, body, priority, enabled, note,
+                    created_ms, updated_ms
+             FROM persona ORDER BY priority DESC, created_ms DESC",
+        )?;
+        let items = stmt
+            .query_map([], |r| {
+                let model_regex: String = r.get(2)?;
+                Ok(PersonaItem {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    regex_ok: model_regex.trim().is_empty()
+                        || regex::Regex::new(&model_regex).is_ok(),
+                    model_regex,
+                    body: r.get(3)?,
+                    priority: r.get(4)?,
+                    enabled: r.get::<_, i64>(5)? != 0,
+                    note: r.get(6)?,
+                    created_ms: r.get(7)?,
+                    updated_ms: r.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(items)
+    })
+}
+
+/// 按模型 id 选一条人格。
+///
+/// 规则（从强到弱）：
+/// 1. 只考虑 `enabled = 1` 的；
+/// 2. `model_regex` 为空 = 兜底，**优先级永远最低**（不管 priority 填多少），
+///    否则一条 priority=99 的兜底会盖住所有精确匹配；
+/// 3. 其余按 `priority` 降序、`created_ms` 降序取第一条匹配的；
+/// 4. 一个都不匹配 → `None`（不回退到兜底也不行，兜底已经在第 2 步里参与过了）。
+///
+/// `model` 传空串时只会命中兜底人格 —— 调用方没报模型 id 时，
+/// 不该让一条 `deepseek.*` 的专用人格顶上。
+pub fn pick_persona(db: &Db, model: &str) -> Result<Option<PersonaItem>> {
+    let all = personas(db)?;
+    let model = model.trim();
+    let mut fallback: Option<PersonaItem> = None;
+    for p in all.into_iter().filter(|p| p.enabled && p.regex_ok) {
+        if p.model_regex.trim().is_empty() {
+            if fallback.is_none() {
+                fallback = Some(p);
+            }
+            continue;
+        }
+        if model.is_empty() {
+            continue;
+        }
+        match regex::Regex::new(&p.model_regex) {
+            Ok(re) if re.is_match(model) => return Ok(Some(p)),
+            _ => {}
+        }
+    }
+    Ok(fallback)
+}
+
 // ------------------------------------------------------------------ 渠道
 
 #[derive(Debug, Serialize)]

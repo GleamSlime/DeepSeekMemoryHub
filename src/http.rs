@@ -1143,7 +1143,7 @@ async fn post_fact(
     }))
 }
 
-fn rand_suffix() -> String {
+pub(crate) fn rand_suffix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1849,6 +1849,14 @@ struct ContextQuery {
     /// 默认必须落在能给出去的**最小**集合上，不能靠调用方自觉。
     #[serde(default)]
     scene: Option<String>,
+    /// 这一轮用的模型 id（例如 `deepseek-v4.1-flash`）。
+    ///
+    /// 用它去匹配「人格」卡片里的正则：不同模型对同一角色往往要不同的叮嘱
+    /// （小模型要更强的格式约束，推理模型要更少的「慢慢想」提示），
+    /// 而人格属于**注入的内容**，所以在这里一起给出去。
+    /// 不传 = 只匹配「兜底人格」（正则为空的那条）。
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2044,10 +2052,43 @@ async fn get_context(
         note_recalled(&st.db, &recalled, &q_raw, "context");
     }
 
+    // 人格段放**最前面**：它规定「你是谁、怎么说话」，
+    // 后面的计划/记忆都是「你知道什么」。顺序反过来模型会先入为主当资料员。
+    let persona_block = {
+        let wanted = q.model.clone().unwrap_or_default();
+        let db = st.db.clone();
+        match tokio::task::spawn_blocking(move || crate::query::pick_persona(&db, &wanted)).await {
+            Ok(Ok(Some(p))) => Some(format!("# 你是谁\n{}", p.body.trim())),
+            Ok(Ok(None)) => None,
+            Ok(Err(e)) => {
+                tracing::warn!("人格查询失败（不影响上下文）：{e}");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("人格查询任务失败（不影响上下文）：{e}");
+                None
+            }
+        }
+    };
+    let (text, mut parts) = match persona_block {
+        Some(b) => {
+            let mut t = b;
+            if !assembled.text.is_empty() {
+                t.push_str("\n\n");
+                t.push_str(&assembled.text);
+            }
+            let mut p = vec!["persona".to_string()];
+            p.extend(assembled.parts.iter().cloned());
+            (t, p)
+        }
+        None => (assembled.text.clone(), assembled.parts.clone()),
+    };
+    parts.shrink_to_fit();
+
     Ok(Json(ContextBody {
-        chars: assembled.text.chars().count(),
-        text: assembled.text,
-        parts: assembled.parts,
+        chars: text.chars().count(),
+        text,
+        parts,
         dropped: assembled.dropped,
         generated_ms: now_ms(),
         scene: scene.as_str(),

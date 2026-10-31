@@ -471,6 +471,7 @@ const PAGES = {
   replay:    {title:'注入回放', icon:'🔍', url:'/api/admin/recall-traces'},
   kb:        {title:'知识库',   icon:'📚', url:'/api/admin/kb'},
   channels:  {title:'渠道',     icon:'🔌', url:'/api/admin/channels'},
+  personas:  {title:'人格',     icon:'🎭', url:'/api/admin/personas'},
   settings:  {title:'配置',     icon:'🎛', url:'/api/admin/settings'},
   persons:   {title:'身份',     icon:'👥', url:'/api/admin/persons'},
   snapshots: {title:'快照',     icon:'💾', url:'/api/admin/snapshots'},
@@ -482,7 +483,7 @@ const NAV_GROUPS = [
   {label:'记忆数据', items:['events','facts','journal','diaries']},
   {label:'知识库', items:['kb']},
   {label:'规划', items:['plans']},
-  {label:'人格', items:['mood','self','relations','traits','promises']},
+  {label:'人格', items:['personas','mood','self','relations','traits','promises']},
   {label:'渠道', items:['channels','messages']},
   {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
 ];
@@ -546,6 +547,7 @@ async function render(){
     if(state.page==='replay') return await renderReplay(c);
     if(state.page==='kb') return await renderKb(c);
     if(state.page==='channels') return await renderChannels(c);
+    if(state.page==='personas') return await renderPersonas(c);
     // 「配置」也有专用渲染函数。少了这一行它会掉进 renderTable 兜底，
     // 而 renderTable 不认 'settings' —— 于是整页只剩一个空的筛选栏，
     // 用户看到的就是「配置菜单里什么也没有」。
@@ -1780,6 +1782,109 @@ function openRelationEdit(r){
       toast('已保存'); closeDrawer(); render();
     }catch(e){ toast('保存失败：'+e.message, true); }
   };
+}
+
+// ---------- 人格
+//
+// 一个角色在不同模型上要不同的叮嘱（小模型要更强的格式约束，推理模型要更少的
+// 「慢慢想」提示）。这张表按**模型 id 正则**匹配，命中的那条注入 /v1/context。
+async function renderPersonas(c){
+  const items = await api('/api/admin/personas');
+  c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
+    接入方调 <code>/v1/context?model=&lt;模型id&gt;</code> 时，中枢按正则挑一条注入上下文最前面。
+    <b>正则为空 = 兜底</b>（优先级永远最低）；优先级高的先匹配。
+  </p>
+  <div class="tablewrap">
+    <div class="tbl-head"><span class="t">人格</span>
+      <span class="dim">共 ${items.length} 条</span><span class="sp"></span>
+      <button class="primary" id="perNew">+ 新增人格</button></div>
+    ${items.length?`<div style="overflow-x:auto"><table><thead><tr>
+      <th>名字</th><th>匹配的模型 id（正则）</th><th class="num">优先级</th>
+      <th>状态</th><th class="num">正文</th><th style="width:110px"></th></tr></thead>
+    <tbody>${items.map(p=>`<tr>
+      <td><b>${esc(p.name)}</b>${p.note?`<div class="dim" style="font-size:11.5px">${esc(p.note)}</div>`:''}</td>
+      <td class="mono dim">${p.model_regex?esc(p.model_regex):'（兜底：所有模型）'}
+        ${p.regex_ok?'':'<span class="badge b-err">正则不合法</span>'}</td>
+      <td class="num">${p.priority}</td>
+      <td>${p.enabled?'<span class="badge b-ok">启用</span>':'<span class="badge b-extracted">停用</span>'}</td>
+      <td class="num">${p.body.length}</td>
+      <td><button class="chip" data-per-edit="${esc(p.id)}">编辑</button></td>
+    </tr>`).join('')}</tbody></table></div>`
+    :'<div class="empty">还没有人格。没有时 <code>/v1/context</code> 就只给记忆，不给人设。</div>'}
+  </div>`;
+
+  const openEditor = (p)=>{
+    const isNew = !p;
+    showDrawer(isNew?'新增人格':'人格 · '+p.name, `
+      <div class="editrow"><label>名字 <span class="dim">给人看的，比如「鲸鲸（flash 版）」</span></label>
+        <input id="perName" value="${esc(p?p.name:'')}"></div>
+      <div class="editrow"><label>匹配的模型 id <span class="dim">正则；留空 = 兜底</span></label>
+        <input id="perRegex" value="${esc(p?p.model_regex:'')}" placeholder="例如 deepseek.*flash">
+        <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+          <input id="perTest" placeholder="填个模型 id 试试会命中哪条" style="flex:1">
+          <button id="perTestBtn">试匹配</button>
+        </div>
+        <div id="perTestOut" class="dim" style="font-size:11.5px"></div>
+      </div>
+      <div class="editrow"><label>优先级 <span class="dim">大的先匹配；兜底永远最后</span></label>
+        <input type="number" id="perPrio" value="${p?p.priority:0}"></div>
+      <div class="editrow"><label>状态</label>
+        <span class="seg" id="perEnabled">
+          <button data-v="1" class="${!p||p.enabled?'on':''}">启用</button>
+          <button data-v="0" class="${p&&!p.enabled?'on':''}">停用</button>
+        </span></div>
+      <div class="editrow"><label>备注</label>
+        <input id="perNote" value="${esc(p&&p.note?p.note:'')}" placeholder="可空"></div>
+      <div class="editrow"><label>人格正文 <span class="dim">会拼进 system prompt 最前面</span></label>
+        <textarea id="perBody" style="min-height:200px">${esc(p?p.body:'')}</textarea></div>`,
+      `<button class="primary" id="perSave">保存</button>
+       ${isNew?'':`<button class="danger" id="perDel">删除</button>`}
+       <span class="sp"></span>`);
+
+    $('perEnabled').querySelectorAll('button').forEach(b=>{
+      b.onclick=()=>{$('perEnabled').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+    });
+    $('perTestBtn').onclick=async()=>{
+      const m=$('perTest').value.trim();
+      try{
+        const r = await api('/api/admin/persona/preview?model='+encodeURIComponent(m));
+        $('perTestOut').textContent = r.matched
+          ? `命中「${r.matched.name}」（正则 ${r.matched.model_regex||'兜底'}，优先级 ${r.matched.priority}）`
+          : '没有命中任何人格（这段模型 id 不会注入人设）';
+      }catch(e){ $('perTestOut').textContent='试匹配失败：'+e.message; }
+    };
+    $('perSave').onclick=async()=>{
+      const en=$('perEnabled').querySelector('button.on');
+      const body={
+        name:$('perName').value.trim(),
+        model_regex:$('perRegex').value.trim(),
+        priority:+($('perPrio').value||0),
+        enabled: en ? en.dataset.v==='1' : true,
+        note:$('perNote').value.trim(),
+        body:$('perBody').value
+      };
+      if(!body.name){ toast('名字不能为空', true); return; }
+      if(!body.body.trim()){ toast('人格正文不能为空', true); return; }
+      try{
+        if(isNew) await apiDo('POST','/api/admin/personas',body);
+        else await apiDo('PATCH','/api/admin/personas/'+encodeURIComponent(p.id),body);
+        toast('已保存'); closeDrawer(); render();
+      }catch(e){ toast('保存失败：'+e.message, true); }
+    };
+    if(!isNew){
+      $('perDel').onclick=async()=>{
+        if(!confirm(`删除人格「${p.name}」？`)) return;
+        try{ await apiDo('DELETE','/api/admin/personas/'+encodeURIComponent(p.id));
+          toast('已删除'); closeDrawer(); render(); }
+        catch(e){ toast('删除失败：'+e.message, true); }
+      };
+    }
+  };
+
+  $('perNew').onclick=()=>openEditor(null);
+  c.querySelectorAll('[data-per-edit]').forEach(el=>{
+    el.onclick=()=>openEditor(items.find(x=>x.id===el.dataset.perEdit));
+  });
 }
 
 // ---------- 渠道

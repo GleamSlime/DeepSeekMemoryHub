@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 /// 数据库句柄。
 ///
@@ -359,6 +359,7 @@ impl Db {
 /// 所有业务表。`counts()` 与快照校验都按这个列表走。
 pub const TABLES: &[&str] = &[
     "channel",
+    "persona",
     "person",
     "person_account",
     "person_scene",
@@ -418,6 +419,28 @@ CREATE TABLE IF NOT EXISTS person (
   -- 1 = 忽视：这个人的消息不回复、不入库（面板「身份」页勾选）
   ignored      INTEGER NOT NULL DEFAULT 0
 );
+
+-- 人格卡片：按**模型 id 正则**匹配，命中的那条注入上下文。
+--
+-- 为什么按模型匹配而不是全局一份：同一个角色跑在不同模型上要微调
+-- （小模型要更强的格式约束，推理模型要更少的「慢慢想」提示）。
+-- 一个角色只能有一位人格，但可以给不同模型挂不同的人格变体。
+CREATE TABLE IF NOT EXISTS persona (
+  id          TEXT PRIMARY KEY,
+  -- 给人看的名字，比如「鲸鲸（flash 版）」
+  name        TEXT NOT NULL,
+  -- 匹配模型 id 的正则（Rust regex 语法）。空 = 匹配所有模型（兜底人格）。
+  model_regex TEXT NOT NULL DEFAULT '',
+  -- 这段文本会拼进 system prompt 的最前面（人设本身）
+  body        TEXT NOT NULL,
+  -- 数字越大越优先；同优先级时取**后**创建的那条（方便覆盖）
+  priority    INTEGER NOT NULL DEFAULT 0,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  note        TEXT,
+  created_ms  INTEGER NOT NULL,
+  updated_ms  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS persona_priority ON persona(priority DESC, created_ms DESC);
 
 CREATE TABLE IF NOT EXISTS person_account (
   channel       TEXT NOT NULL,         -- mc / qq / live / system

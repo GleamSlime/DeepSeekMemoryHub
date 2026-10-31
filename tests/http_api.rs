@@ -3492,3 +3492,70 @@ async fn 人工改过重要度会标成_manual() {
         "人工改过之后自动依据要清掉，不然显示自相矛盾"
     );
 }
+
+#[tokio::test]
+async fn 上下文按模型_id_注入人格且放在最前面() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO persona(id, name, model_regex, body, priority, enabled,
+                                 note, created_ms, updated_ms)
+             VALUES ('per1','flash 版','deepseek.*flash','你是小模型版。',10,1,NULL,1,1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO persona(id, name, model_regex, body, priority, enabled,
+                                 note, created_ms, updated_ms)
+             VALUES ('per2','兜底','','你是兜底人格。',100,1,NULL,2,2)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // 命中专用人格，且 parts 里第一个是 persona
+    let j: serde_json::Value = s
+        .get("/v1/context?q=在吗&model=deepseek-v4.1-flash")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(text.starts_with("# 你是谁"), "人格要在最前面：{text}");
+    assert!(text.contains("你是小模型版"), "命中 flash 专用人格：{text}");
+    assert!(!text.contains("兜底人格"));
+    assert_eq!(j["parts"][0], "persona");
+
+    // 其它模型 → 兜底
+    let j: serde_json::Value = s
+        .get("/v1/context?q=在吗&model=gpt-4o")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(text.contains("你是兜底人格"), "{text}");
+
+    // 不传 model → 只兜底
+    let j: serde_json::Value = s.get("/v1/context?q=在吗").await.json().await.unwrap();
+    assert!(j["text"].as_str().unwrap().contains("你是兜底人格"));
+}
+
+#[tokio::test]
+async fn 没有配人格时上下文不受影响() {
+    let s = TestServer::start().await;
+    let j: serde_json::Value = s
+        .get("/v1/context?q=在吗&model=anything")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !j["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "persona"),
+        "没人格就不该有这一段：{j}"
+    );
+}

@@ -28,14 +28,10 @@ pub struct AdminState {
 }
 
 impl AdminState {
-    pub fn new(app: AppState, cfg: &Config) -> Self {
-        // 先取 db，再 move app：Auth 需要 Arc<Db> 来落盘会话。
-        let db = app.db.clone();
-        let auth = std::sync::Arc::new(Auth::with_db(
-            &cfg.panel_user,
-            &cfg.panel_password,
-            Some(db),
-        ));
+    pub fn new(app: AppState, _cfg: &Config) -> Self {
+        // 复用 `AppState` 里那一份 Auth：面板与「面板发出的数据写操作」
+        // 必须是同一套会话校验，否则会出现「能登录却改不了」这种怪现象。
+        let auth = app.auth.clone();
         Self { app, auth }
     }
 }

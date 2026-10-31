@@ -1287,10 +1287,31 @@ fn closeness_stage(c: i64) -> String {
 #[derive(Debug, Serialize)]
 pub struct TraitItem {
     pub trait_: String,
+    /// 特质的中文名。库里存的是英文键（`warmth`），面板给人看要中文。
+    pub name: String,
+    /// 一句话解释这个特质是什么、高了低了分别怎样。
+    pub desc: String,
     pub value: f64,
     pub updated_ms: i64,
     /// 数值的中文说法，避免面板上只看到 0.62 不知道什么意思。
     pub word: String,
+}
+
+/// 特质键 → (中文名, 解释)。未知键原样显示，不猜。
+///
+/// 键的集合来自 MC 侧 `Affect.traitFor`：warmth / clinginess / boldness /
+/// diligence / patience。新增键要同时改这里，否则面板上又是一串英文。
+pub fn trait_label(key: &str) -> (String, String) {
+    let (name, desc) = match key {
+        "warmth" => ("温和", "待人亲不亲。高了更愿意主动搭话、共情，低了更冷淡。"),
+        "curiosity" => ("好奇", "对新东西的兴趣。高了爱凑过去看，低了懒得动。"),
+        "diligence" => ("勤快", "答应的事做不做完。高了说到做到，低了拖延。"),
+        "patience" => ("耐心", "等待和卡住时的耐性。高了能熬，低了容易不耐烦。"),
+        "boldness" => ("胆量", "遇事敢不敢上。高了敢下矿敢打，低了绕路。"),
+        "clinginess" => ("黏人", "离了人会不会不安。高了被冷落就闹，低了自己也能待。"),
+        _ => return (key.to_string(), String::new()),
+    };
+    (name.to_string(), desc.to_string())
 }
 
 pub fn traits(db: &Db) -> Result<Vec<TraitItem>> {
@@ -1300,8 +1321,12 @@ pub fn traits(db: &Db) -> Result<Vec<TraitItem>> {
         let items = stmt
             .query_map([], |r| {
                 let v: f64 = r.get(1)?;
+                let key: String = r.get(0)?;
+                let (name, desc) = trait_label(&key);
                 Ok(TraitItem {
-                    trait_: r.get(0)?,
+                    trait_: key,
+                    name,
+                    desc,
                     value: v,
                     updated_ms: r.get(2)?,
                     word: trait_word(v),
@@ -1993,6 +2018,11 @@ pub struct InjectionRow {
     pub chars: i64,
     pub injected: bool,
     pub replay: Option<String>,
+    /// 这一轮真正发给模型的上下文全文（插件上报时带上）。
+    ///
+    /// 老记录没有这一列的值 → `None`，面板显示「这一轮没留全文」，
+    /// 不要拿摘要冒充全文。
+    pub full_text: Option<String>,
 }
 
 /// 插件推上来的真实注入回放，新的在前。
@@ -2000,7 +2030,7 @@ pub fn injection_replays(db: &Db, limit: usize) -> Result<Vec<InjectionRow>> {
     let limit = limit.clamp(1, 200);
     db.with_read(|c| {
         let mut stmt = c.prepare(
-            "SELECT id, at_ms, lane, query, COALESCE(chars,0), injected, replay
+            "SELECT id, at_ms, lane, query, COALESCE(chars,0), injected, replay, full_text
              FROM injection_replay ORDER BY at_ms DESC LIMIT ?1",
         )?;
         let items = stmt
@@ -2013,6 +2043,7 @@ pub fn injection_replays(db: &Db, limit: usize) -> Result<Vec<InjectionRow>> {
                     chars: r.get(4)?,
                     injected: r.get::<_, i64>(5)? != 0,
                     replay: r.get(6)?,
+                    full_text: r.get(7)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

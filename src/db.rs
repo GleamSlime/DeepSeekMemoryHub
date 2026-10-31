@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 12;
 
 /// 数据库句柄。
 ///
@@ -252,6 +252,10 @@ impl Db {
             add_column_if_missing(tx, "recall_log", "kept", "INTEGER")?;
             add_column_if_missing(tx, "recall_log", "reason", "TEXT")?;
             add_column_if_missing(tx, "recall_log", "text", "TEXT")?;
+            // 注入回放要能「点开看具体内容」。replay 那一列存的是**摘要**
+            // （哪段进了、哪段超预算），真正的文本在插件手里 ——
+            // 不存下来的话，面板上永远只能看到一行摘要，排查时要翻日志。
+            add_column_if_missing(tx, "injection_replay", "full_text", "TEXT")?;
 
             // ---------------------------------------------------------- 结构迁移 v7
             //

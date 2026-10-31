@@ -39,8 +39,10 @@ impl S {
 
         let db = Db::open(cfg.db_path()).unwrap();
         let app_state = AppState::new(db.clone(), cfg.clone()).unwrap();
-        let admin = AdminState::new(app_state.clone(), &cfg);
-        let app = api_router(app_state).merge(admin_router(admin));
+        // 用完整路由：线上跑的就是 `full_router`（http + legacy + admin）。
+        // 只 merge http/admin 两套会让 `/v1/prune` 这类接口在测试里变成 404，
+        // 于是「它到底是不是 401」这种断言测的是错误的东西。
+        let app = bluewhale_memory::http::full_router(app_state.clone());
 
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -381,23 +383,41 @@ async fn 身份详情带出全部渠道账号() {
 // ================================================================== 隔离
 
 #[tokio::test]
-async fn 后台会话不能替代_api_token() {
-    // 两条鉴权链互不替代：cookie 只给面板，token 只给 API。
-    // 否则一个泄露的浏览器会话就能冒充服务账号。
+async fn 面板会话不能用于危险运维接口() {
+    // 口径（2026-11-01 调整）：
+    //   · **数据增删改**（event/fact/journal/diary/message）→ 接受 token **或**面板会话，
+    //     这样人在浏览器里改一条记忆不用先去填 token；
+    //   · **危险运维**（回滚 / 清理 / 快照 / 绑定身份）→ 仍然只认 token。
+    //     这几种一次就能把一批记忆抹掉或改归属，不该由一个可能被复用的浏览器会话触发。
     let s = S::start().await;
     let ck = s.login().await;
 
-    // 用 cookie 请求 /v1/event（需要 X-API-Token）→ 仍应 401
     let r = S::client()
-        .post(format!("{}/v1/event", s.base))
+        .post(format!("{}/v1/rollback", s.base))
         .header("cookie", &ck)
-        .json(&serde_json::json!({
-            "companion_id":"c1","channel":"mc","kind":"k","summary":"s"
-        }))
+        .json(&serde_json::json!({"target_ms": 0}))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 401, "cookie 不该能调 API");
+    assert_eq!(r.status(), 401, "回滚不该被 cookie 触发");
+
+    let r = S::client()
+        .post(format!("{}/v1/prune", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "清理不该被 cookie 触发");
+
+    let r = S::client()
+        .post(format!("{}/v1/person/bind", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"channel":"qq","account":"1","person_id":"p1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "身份绑定不该被 cookie 触发");
 }
 
 #[tokio::test]
@@ -1034,4 +1054,63 @@ async fn 新建身份时显示名不能为空也不能未登录() {
         .await
         .unwrap();
     assert_eq!(r.status(), 401);
+}
+
+// ================================================================== 面板写操作不再要 token
+
+#[tokio::test]
+async fn 面板会话可以直接改事件不需要_api_token() {
+    // 用户口径：面板里改数据不该再让填 token。
+    // 这批写口（/v1/event 等）现在同时接受 token 或面板会话。
+    let s = S::start().await;
+    let ck = s.login().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO event(at_ms, kind, channel, summary, importance, scope)
+             VALUES (1,'test','mc','原始摘要',0.5,'companion')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let r = S::client()
+        .patch(format!("{}/v1/event/1", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"summary":"面板改过的","importance":0.9}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "带会话就该能改");
+
+    let j: serde_json::Value = s
+        .get_with("/api/admin/events", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["items"][0]["summary"], "面板改过的");
+}
+
+#[tokio::test]
+async fn 没有会话也没有_token_仍然拒绝() {
+    // 放宽的是「接受 cookie」，不是「谁都能写」。
+    let s = S::start().await;
+    let r = S::client()
+        .post(format!("{}/v1/event", s.base))
+        .json(&serde_json::json!({"channel":"mc","kind":"x","summary":"y"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // 伪造一个 cookie 也不行
+    let r = S::client()
+        .patch(format!("{}/v1/event/1", s.base))
+        .header("cookie", "bw_panel=deadbeef")
+        .json(&serde_json::json!({"summary":"x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "假会话必须被拒");
 }

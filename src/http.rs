@@ -55,6 +55,13 @@ pub struct AppState {
     /// **不是硬依赖**：为 `None` 时知识库检索退回纯字面，
     /// 与「Hub 停掉时 MC 照常工作」是同一套降级风格。
     pub embedder: Option<Arc<crate::kb::embed::Embedder>>,
+    /// 面板会话校验器。
+    ///
+    /// 放在这里是为了让**面板里点的写操作**（改事件/删事实…）能复用同一套会话校验：
+    /// 那些 handler 挂在 `/v1/*` 上，原来只认 `X-API-Token`，于是人在浏览器里
+    /// 改一条记忆还得先去填 token —— 用户明确要求去掉这一步。
+    /// 与 `AdminState` 里的是同一个东西（`AdminState::new` 直接取这一份）。
+    pub auth: Arc<crate::auth::Auth>,
 }
 
 impl AppState {
@@ -65,6 +72,11 @@ impl AppState {
         // 注意顺序：`build_embedder` 借 `cfg`，而下面要把 `cfg` move 进结构体。
         // 先算出结果再 move，否则借用检查器（正确地）拦住。
         let embedder = build_embedder(&cfg);
+        let auth = Arc::new(crate::auth::Auth::with_db(
+            &cfg.panel_user,
+            &cfg.panel_password,
+            Some(db.clone()),
+        ));
         Ok(Self {
             db,
             cfg,
@@ -73,6 +85,7 @@ impl AppState {
             weight: Arc::new(std::sync::RwLock::new(weight)),
             index: Arc::new(IndexCache::default()),
             embedder,
+            auth,
         })
     }
 }
@@ -376,6 +389,33 @@ pub(crate) fn check_token(state: &AppState, headers: &HeaderMap) -> Result<()> {
     }
 }
 
+/// 面板写操作也走 `/v1/*`（同一批 handler），但人在浏览器里没有 API token。
+///
+/// 口径（用户 2026-10-31 要求）：**面板里改数据不该再让用户去填 token**。
+/// 所以这些写口允许两种凭据之一：
+///
+/// - `X-API-Token`（脚本 / 其他服务）；
+/// - 面板会话 cookie（人在浏览器里点出来的请求）。
+///
+/// 安全性没有降低：两者本身就是两套独立鉴权，这里只是**接受其中任意一个**，
+/// 而不是把 cookie 当成 token 用。只允许 cookie 的路径仍限于 `/api/admin/*` 之外
+/// 的这一小批数据写口，且会话本身要过 `Auth::verify`。
+pub(crate) fn check_token_or_session(state: &AppState, headers: &HeaderMap) -> Result<()> {
+    if check_token(state, headers).is_ok() {
+        return Ok(());
+    }
+    // cookie 分支：与 `/api/admin/*` 同一套会话校验（同一份 Auth）。
+    let sid = crate::auth::session_from_cookie(
+        headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok()),
+    );
+    if !sid.is_empty() && state.auth.verify(&sid).is_some() {
+        return Ok(());
+    }
+    Err(Error::Unauthorized)
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -647,7 +687,7 @@ async fn post_event(
     headers: HeaderMap,
     Json(body): Json<NewEvent>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
 
     let channel = Channel::parse(&body.channel)
         .ok_or_else(|| Error::BadRequest(format!("未知渠道：{}", body.channel)))?;
@@ -878,7 +918,7 @@ async fn post_fact(
     headers: HeaderMap,
     Json(body): Json<NewFact>,
 ) -> ApiResult<FactWriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     // `channel` 在写事实时是**可选**的：它只参与权重计算（渠道可信度），
     // 不影响存什么。所以留空回退到 system，而不是报错——
     // 早先这里直接 parse 空串，导致「不传 channel 就 400」，实测踩到。
@@ -2530,7 +2570,7 @@ async fn patch_event(
     axum::extract::Path(id): axum::extract::Path<i64>,
     Json(p): Json<EventPatch>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     if let Some(v) = p.importance {
         if !(0.0..=1.0).contains(&v) {
             return Err(Error::BadRequest("importance 必须在 [0,1]".into()));
@@ -2595,7 +2635,7 @@ async fn patch_fact(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(p): Json<FactPatch>,
 ) -> ApiResult<FactWriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     for (name, v) in [("importance", p.importance), ("confidence", p.confidence)] {
         if let Some(v) = v {
             if !(0.0..=1.0).contains(&v) {
@@ -2660,7 +2700,7 @@ async fn patch_journal(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(p): Json<JournalPatch>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     if let Some(v) = p.importance {
         if !(0.0..=1.0).contains(&v) {
             return Err(Error::BadRequest("importance 必须在 [0,1]".into()));
@@ -2755,7 +2795,7 @@ async fn delete_event(
     axum::extract::Path(id): axum::extract::Path<i64>,
     body: Option<Json<DeleteRequest>>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let note = body.and_then(|b| b.note.clone());
     let id_s = id.to_string();
@@ -2774,7 +2814,7 @@ async fn delete_fact(
     axum::extract::Path(id): axum::extract::Path<String>,
     body: Option<Json<DeleteRequest>>,
 ) -> ApiResult<FactWriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let note = body.and_then(|b| b.note.clone());
     let id2 = id.clone();
@@ -2793,7 +2833,7 @@ async fn delete_journal(
     axum::extract::Path(id): axum::extract::Path<String>,
     body: Option<Json<DeleteRequest>>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let note = body.and_then(|b| b.note.clone());
     let id2 = id.clone();
@@ -2812,7 +2852,7 @@ async fn delete_diary(
     axum::extract::Path(id): axum::extract::Path<String>,
     body: Option<Json<DeleteRequest>>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let note = body.and_then(|b| b.note.clone());
     let id2 = id.clone();
@@ -2839,7 +2879,7 @@ async fn delete_message(
     axum::extract::Path(id): axum::extract::Path<i64>,
     body: Option<Json<DeleteRequest>>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let note = body.and_then(|b| b.note.clone());
     let id_s = id.to_string();
@@ -2886,7 +2926,7 @@ async fn post_journal(
     headers: HeaderMap,
     Json(b): Json<NewJournal>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     if b.summary.trim().is_empty() {
         return Err(Error::BadRequest("summary 不能为空".into()));
     }
@@ -2963,7 +3003,7 @@ async fn post_diary(
     headers: HeaderMap,
     Json(b): Json<NewDiary>,
 ) -> ApiResult<WriteResult> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     if b.body.trim().is_empty() {
         return Err(Error::BadRequest("body 不能为空".into()));
     }

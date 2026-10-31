@@ -1020,6 +1020,12 @@ struct ReplayEntry {
     chars: Option<i64>,
     injected: Option<bool>,
     replay: Option<String>,
+    /// 这一轮真正拼进提示词的上下文全文（可选）。
+    ///
+    /// 为什么不强制：老客户端没有这个字段，强制会让它们整体 422。
+    /// 但**有就该存下来** —— 面板「注入回放」点开要看的就是它。
+    #[serde(default)]
+    full_text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1054,8 +1060,8 @@ async fn post_injection_replay(
                 }
                 tx.execute(
                     "INSERT INTO injection_replay(at_ms, lane, query, chars,
-                                                  injected, replay, dedup_key)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                                                  injected, replay, dedup_key, full_text)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                     rusqlite::params![
                         e.at_ms,
                         e.lane,
@@ -1063,7 +1069,8 @@ async fn post_injection_replay(
                         e.chars,
                         e.injected.unwrap_or(false) as i64,
                         e.replay,
-                        key
+                        key,
+                        e.full_text
                     ],
                 )?;
                 n += 1;

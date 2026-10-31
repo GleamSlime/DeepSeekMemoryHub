@@ -2967,6 +2967,45 @@ async fn 情绪流水能列出来() {
 }
 
 #[tokio::test]
+async fn 注入回放可以带全文并在面板读到() {
+    // 「注入回放目前作用不大」的根因是只存了摘要：面板上永远只有
+    // 「memory: 已注入」，看不到到底塞了什么。现在允许带 full_text。
+    let s = TestServer::start().await;
+    let full = "# 你最近在做什么\n- 在盖房子\n\n# 你记得的事\n- 钻石";
+    let r = s
+        .post(
+            "/v1/injection-replay",
+            serde_json::json!({"entries":[{
+                "at_ms":2000,"lane":"qq-group","query":"在吗",
+                "chars":full.chars().count(),"injected":true,
+                "replay":"plan: 已注入 | memory: 已注入",
+                "full_text":full
+            }]}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+
+    // 老客户端不传 full_text 也要能写（向后兼容）
+    let r = s
+        .post(
+            "/v1/injection-replay",
+            serde_json::json!({"entries":[{"at_ms":3000,"lane":"mc","replay":"x"}]}),
+        )
+        .await;
+    assert_eq!(r.status(), 200, "缺 full_text 不该 422");
+
+    let j: serde_json::Value = s.get("/api/admin/injections").await.json().await.unwrap();
+    let rows = j["items"].as_array().unwrap();
+    let with_full = rows.iter().find(|x| x["at_ms"] == 2000).unwrap();
+    assert_eq!(with_full["full_text"], full, "全文要能原样读回");
+    let without = rows.iter().find(|x| x["at_ms"] == 3000).unwrap();
+    assert!(
+        without["full_text"].is_null(),
+        "没传就该是 null，不能编一个"
+    );
+}
+
+#[tokio::test]
 async fn 注入回放按条目数组写入() {
     let s = TestServer::start().await;
     let r = s

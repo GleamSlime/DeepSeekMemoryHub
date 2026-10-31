@@ -535,6 +535,10 @@ async function render(){
     // 实测 2026-10-30：用户报「只显示了[注入回放 共 30 条]其余什么也没显示」。
     if(state.page==='replay') return await renderReplay(c);
     if(state.page==='kb') return await renderKb(c);
+    // 「配置」也有专用渲染函数。少了这一行它会掉进 renderTable 兜底，
+    // 而 renderTable 不认 'settings' —— 于是整页只剩一个空的筛选栏，
+    // 用户看到的就是「配置菜单里什么也没有」。
+    if(state.page==='settings') return await renderSettings(c);
     return await renderTable(c, state.page);
   }catch(e){
     // 渲染错误要连堆栈一起显示：只写「加载失败」会让人以为是网络或后端问题，
@@ -776,7 +780,6 @@ async function renderTable(c, page){
     $('edDel').onclick=()=>confirmDelete(`/v1/event/${e.id}`, '这条事件');
 
     $('edSave').onclick=()=>{
-      apiToken();
       savePatch(`/v1/event/${e.id}`, {
         summary: $('edSummary').value,
         importance: +$('edImp').value,
@@ -787,7 +790,8 @@ async function renderTable(c, page){
   c.querySelectorAll('[data-fact]').forEach(el=>el.onclick=()=>{
     const f=JSON.parse(el.dataset.fact);
     showDrawer('事实 · '+f.key, `<div class="editrow">
-        <label>键</label><input id="fdKey" value="${esc(f.key)}" disabled class="dim">
+        <label>键 <span class="dim">不可修改 —— 改键等于换一条事实；要改就删了重建</span></label>
+        <input id="fdKey" value="${esc(f.key)}" disabled class="dim">
       </div>
       <div class="editrow">
         <label>值</label><textarea id="fdValue">${esc(f.value)}</textarea>
@@ -829,7 +833,6 @@ async function renderTable(c, page){
       };
     });
     $('fdSave').onclick=()=>{
-      apiToken();
       const tierBtn=$('fdTier').querySelector('button.on');
       savePatch(`/v1/fact/${encodeURIComponent(f.id)}`, {
         value: $('fdValue').value,
@@ -867,7 +870,6 @@ async function renderTable(c, page){
     $('jrDel').onclick=()=>confirmDelete(`/v1/journal/${encodeURIComponent(j.id)}`, '这条手帐');
 
     $('jrSave').onclick=()=>{
-      apiToken();
       savePatch(`/v1/journal/${encodeURIComponent(j.id)}`, {
         summary: $('jrSummary').value,
         details: $('jrDetails').value,
@@ -1147,7 +1149,7 @@ function openCreate(page){
 
   showDrawer(form.title, html,
     `<button class="primary" id="newSave">创建</button><span class="sp"></span>
-     <span class="dim" style="font-size:11.5px;align-self:center">需要 API token</span>`);
+     <span class="dim" style="font-size:11.5px;align-self:center">用当前登录身份写入</span>`);
 
   document.querySelectorAll('[data-newseg]').forEach(box=>{
     box.querySelectorAll('button').forEach(b=>{
@@ -1156,7 +1158,6 @@ function openCreate(page){
   });
 
   $('newSave').onclick=async()=>{
-    apiToken();
     const g={};
     for(const f of form.fields){
       if(f.seg){
@@ -1174,9 +1175,9 @@ function openCreate(page){
     const body=form.build(g);
     try{
       const r=await fetch(form.url,{method:'POST',
-        headers:{'Content-Type':'application/json','X-API-Token':localStorage.getItem('bw_api_token')||''},
+        headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)});
-      if(r.status===401){ toast('需要 API token', true); return; }
+      if(r.status===401){ toast('登录状态已失效，请重新登录', true); return; }
       if(!r.ok){
         let m=r.status+'';
         try{const j=await r.json(); if(j.error)m=j.error;}catch(_){}
@@ -1758,13 +1759,15 @@ async function renderTraits(c){
   }
   c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
     人格成长：这些值由经历慢慢沉淀，不会因为一次事件剧烈变化。
+    每一次只挪一点点，所以它反映的是「长期处在这种相处里，它变成了什么样」。
   </p>
   <div class="cards">${d.items.map(t=>`
     <div class="card" style="cursor:default">
-      <div class="k">${esc(t.trait_)}</div>
+      <div class="k">${esc(t.name || t.trait_)}${t.desc?` <span class="dim mono" style="font-size:10.5px">${esc(t.trait_)}</span>`:''}</div>
       <div class="v">${t.value.toFixed(2)}</div>
       <div class="m">${esc(t.word)} · ${fmtAgo(t.updated_ms)}</div>
       <div style="margin-top:9px">${impBar(t.value)}</div>
+      ${t.desc?`<div class="dim" style="font-size:11.5px;margin-top:8px;line-height:1.6">${esc(t.desc)}</div>`:''}
     </div>`).join('')}</div>`;
 }
 
@@ -1806,7 +1809,8 @@ async function renderReplay(c){
         const parts = (r.replay||'').split('|').map(x=>x.trim()).filter(Boolean);
         const kept = parts.filter(x=>!x.startsWith('dropped'));
         const drop = parts.filter(x=>x.startsWith('dropped'));
-        return `<div class="trace">
+        const hasFull = !!(r.full_text && r.full_text.trim());
+        return `<div class="trace" ${hasFull?`data-inj='${esc(JSON.stringify(r))}' style="cursor:pointer"`:''}>
           <div class="trace-head">
             <span class="mono" style="font-size:12px">${fmtTime(r.at_ms)}</span>
             <span class="badge b-extracted">${esc(r.lane||'main')}</span>
@@ -1816,6 +1820,7 @@ async function renderReplay(c){
             ${r.injected?'<span class="badge b-ok">已注入</span>':'<span class="badge b-warn">未注入</span>'}
             <span class="badge b-ok">${kept.length} 进</span>
             ${drop.length?`<span class="badge b-warn">${drop.length} 丢</span>`:''}
+            ${hasFull?'<span class="badge b-curated">点开看全文</span>':'<span class="dim" style="font-size:11px">没留全文</span>'}
           </div>
           <div class="trace-items">
             ${parts.length? parts.map(p=>{
@@ -1828,6 +1833,27 @@ async function renderReplay(c){
           </div>
         </div>`;
       }).join('')}`;
+
+    // 点开看这一轮真正发给模型的上下文全文。
+    // 摘要（哪段进了/哪段超预算）只能回答「塞了没有」，全文才能回答「塞的是什么」。
+    c.querySelectorAll('[data-inj]').forEach(el=>{
+      el.onclick=()=>{
+        const r=JSON.parse(el.dataset.inj);
+        const parts=(r.replay||'').split('|').map(x=>x.trim()).filter(Boolean);
+        showDrawer('注入回放 · '+fmtTime(r.at_ms), `
+          <div class="kv">
+            <div class="k">场景</div><div class="v mono">${esc(r.lane||'main')}</div>
+            <div class="k">这一轮的话</div><div class="v">${esc(r.query||'（无关键词）')}</div>
+            <div class="k">长度</div><div class="v mono">${r.chars} 字</div>
+            <div class="k">是否注入</div><div class="v">${r.injected?'<span class="badge b-ok">已注入</span>':'<span class="badge b-warn">未注入</span>'}</div>
+          </div>
+          <div class="sectitle">分段摘要</div>
+          <pre class="body">${esc(parts.join('\n'))}</pre>
+          <div class="sectitle">真正发给模型的上下文全文</div>
+          <pre class="body">${esc(r.full_text||'（这一轮没有留全文）')}</pre>`,
+          `<span class="dim" style="font-size:11.5px;align-self:center">全文由插件上报；老记录没有这一列</span>`);
+      };
+    });
     return;
   }
 
@@ -2395,8 +2421,8 @@ async function renderRollbacks(c){
 // ---------- 系统
 async function renderSystem(c){
   // ⚠ 只用**会话鉴权**的接口。
-  // `/v1/*` 走的是 API token，面板带的是 session cookie —— 拿 cookie 去访问
-  // `/v1/stats` 会 401，`st` 变成 null 之后 `st.weight_config.xxx` 直接崩。
+  // 写操作走 `/v1/*`，但中枢对这批数据写口同时接受 **token 或面板会话**：
+  // 人在浏览器里点出来的请求带的是 session cookie，不需要再去填 API token。
   // 这是同一个坑第二次踩：/v1/health 免鉴权所以一直没暴露，
   // 一旦某个页面要的是需要 token 的 /v1 接口，整页就白。
   const [h, s, cfg] = await Promise.all([
@@ -2463,10 +2489,10 @@ async function savePatch(url, body, onDone){
   try{
     const r = await fetch(url, {
       method:'PATCH',
-      headers:{'Content-Type':'application/json','X-API-Token':localStorage.getItem('bw_api_token')||''},
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify(body)
     });
-    if(r.status===401){ toast('需要 API token 才能编辑（后台会话不能替代 API token）', true); return; }
+    if(r.status===401){ toast('登录状态已失效，请重新登录', true); return; }
     if(!r.ok){
       let m=r.status+'';
       try{ const j=await r.json(); if(j.error) m=j.error; }catch(_){}
@@ -2483,13 +2509,12 @@ async function savePatch(url, body, onDone){
 function confirmDelete(url, what){
   const note = prompt(`确定删除${what}？\n\n这是逻辑删除，数据还在库里，可以用回滚撤销恢复。\n\n（可填写删除原因，留空也行）`);
   if(note === null) return; // 点了取消
-  apiToken();
   fetch(url, {
     method:'DELETE',
-    headers:{'Content-Type':'application/json','X-API-Token':localStorage.getItem('bw_api_token')||''},
+    headers:{'Content-Type':'application/json'},
     body: JSON.stringify({note: note || null})
   }).then(async r=>{
-    if(r.status===401){ toast('需要 API token 才能删除', true); return; }
+    if(r.status===401){ toast('登录状态已失效，请重新登录', true); return; }
     if(!r.ok){
       let m=r.status+'';
       try{const j=await r.json(); if(j.error)m=j.error;}catch(_){}
@@ -2500,15 +2525,6 @@ function confirmDelete(url, what){
   }).catch(e=>toast('删除失败：'+e.message, true));
 }
 
-/// 取编辑用的 API token（存在浏览器里，只用于写操作）。
-function apiToken(){
-  let t = localStorage.getItem('bw_api_token');
-  if(!t){
-    t = prompt('编辑需要 API token（服务端 BLUEWHALE_TOKEN 那串）\n\n只存在本浏览器里，不会上传。');
-    if(t) localStorage.setItem('bw_api_token', t.trim());
-  }
-  return t || '';
-}
 function closeDrawer(){
   $('drawer').classList.remove('on');
   $('mask').classList.remove('on');

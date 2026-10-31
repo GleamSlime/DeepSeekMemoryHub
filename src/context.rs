@@ -345,15 +345,28 @@ pub fn render_group_scene(
 
 /// 日记正文的截断长度。再长就是「把整篇日记塞进提示词」，不值。
 pub const DIARY_BODY_CHARS: usize = 80;
+/// 问「日记」时给的正文上限。全文更长时**保留结尾**：
+/// 结尾通常是当晚最后发生的事，也最常被追问。
+pub const DIARY_BODY_CHARS_FULL: usize = 320;
 
 /// `# 你上次记的日记`：最新一篇的标题 + 正文前 80 字。
 pub fn render_diary(title: Option<&str>, body: &str) -> Option<String> {
+    render_diary_with(title, body, DIARY_BODY_CHARS)
+}
+
+/// 同 `render_diary`，但可以指定正文上限。
+///
+/// 为什么需要可调：默认只给 80 字，而一篇日记常常 200 字以上，
+/// **最后一段（往往正是「昨天谁跟我说了什么」）会被截掉** ——
+/// 群里问「你日记里是不是在说我坏话」时，答案恰好在那段里，
+/// 模型只能回「我没写你」，看起来就像上下文没注入。
+pub fn render_diary_with(title: Option<&str>, body: &str, limit: usize) -> Option<String> {
     let body = one_line(body);
     if body.is_empty() {
         return None;
     }
-    let mut text: String = body.chars().take(DIARY_BODY_CHARS).collect();
-    if body.chars().count() > DIARY_BODY_CHARS {
+    let mut text: String = body.chars().take(limit).collect();
+    if body.chars().count() > limit {
         text.push('…');
     }
     let title = title.map(str::trim).filter(|s| !s.is_empty());

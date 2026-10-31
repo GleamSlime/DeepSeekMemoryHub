@@ -345,9 +345,12 @@ pub fn render_group_scene(
 
 /// 日记正文的截断长度。再长就是「把整篇日记塞进提示词」，不值。
 pub const DIARY_BODY_CHARS: usize = 80;
-/// 问「日记」时给的正文上限。全文更长时**保留结尾**：
-/// 结尾通常是当晚最后发生的事，也最常被追问。
-pub const DIARY_BODY_CHARS_FULL: usize = 320;
+/// 问「日记」时给的正文上限。
+///
+/// 320 不够：实测一篇日记 231–450 字，而「读读昨天的日记」这种要求
+/// 是要它**照着念**，少一段就会被听出来。给到 600 —— 1000 预算下
+/// 整段上下文（含其它段）约 900 字，还有余量。
+pub const DIARY_BODY_CHARS_FULL: usize = 600;
 
 /// `# 你上次记的日记`：最新一篇的标题 + 正文前 80 字。
 pub fn render_diary(title: Option<&str>, body: &str) -> Option<String> {

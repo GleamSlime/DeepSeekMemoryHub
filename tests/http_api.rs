@@ -2843,3 +2843,39 @@ async fn 问日记时正文给到结尾而不是只给开头() {
     let text = j["text"].as_str().unwrap();
     assert!(text.contains("搬什么家"), "问日记时应能看到结尾：{text}");
 }
+
+#[tokio::test]
+async fn 要它念日记时给全文() {
+    let s = TestServer::start().await;
+    // 450 字的日记（比线上最长的那篇还长一点）
+    let body: String = (0..15)
+        .map(|i| format!("第{i}段：理箱子、挖煤、垒墙，一共干了不少活儿。"))
+        .collect::<String>()
+        + "夜里那个叫姆姆的又跑来问，说什么我要找新家。啧，我好好的搬什么家。";
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO diary(id, kind, window_start_ms, window_end_ms, title, body,
+                               model, created_ms, updated_ms)
+             VALUES ('d1','day',1,2,'长日记',?1,'t',1,1)",
+            rusqlite::params![body],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let j: serde_json::Value = s
+        .get("/v1/context?q=读读你昨天的日记")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(
+        text.contains("搬什么家"),
+        "「念日记」要把结尾也给到：{text}"
+    );
+    assert!(
+        text.contains("第0段") && text.contains("第14段"),
+        "全文都在，不是只给开头：{text}"
+    );
+}

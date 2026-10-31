@@ -1145,6 +1145,8 @@ struct PersonPatch {
     display_name: Option<String>,
     status: Option<String>,
     note: Option<String>,
+    /// 忽视：true = 这个人的消息不回复、不入库。
+    ignored: Option<bool>,
     /// 各场景里的称呼（mc/qq/qq_group/live）。空串 = 删掉人工值、回落自动推导。
     /// 场景称呼的编辑入口在这里（身份），关系页只读展示。
     scenes: Option<std::collections::HashMap<String, String>>,
@@ -1182,9 +1184,16 @@ async fn api_patch_person(
                 "UPDATE person SET
                    display_name = COALESCE(?1, display_name),
                    status       = COALESCE(?2, status),
-                   note         = COALESCE(?3, note)
+                   note         = COALESCE(?3, note),
+                   ignored      = COALESCE(?5, ignored)
                  WHERE person_id = ?4",
-                rusqlite::params![p.display_name, p.status, p.note, id2],
+                rusqlite::params![
+                    p.display_name,
+                    p.status,
+                    p.note,
+                    id2,
+                    p.ignored.map(|b| b as i64)
+                ],
             )?;
             if let Some(scenes) = &p.scenes {
                 write_scenes(tx, &id2, scenes, crate::db::now_ms())?;

@@ -11,6 +11,8 @@ use bluewhale_memory::db::Db;
 use bluewhale_memory::http::{router as api_router, AppState};
 
 const PW: &str = "test-panel-pass";
+/// 与 `S::start()` 里配置的 token 一致；写接口要它。
+const TOKEN: &str = "test-token-0123456789abcdef";
 
 struct S {
     base: String,
@@ -1251,4 +1253,88 @@ async fn 渠道_tag_必须合法() {
             .unwrap();
         assert_eq!(r.status(), 400, "tag {bad:?} 应被拒");
     }
+}
+
+// ================================================================== 忽视
+
+#[tokio::test]
+async fn 忽视开关能开能关并且影响写入() {
+    let s = S::start().await;
+    let ck = s.login().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms)
+             VALUES ('p1','讨厌鬼','confirmed',1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO person_account(channel, account, person_id, first_seen_ms, last_seen_ms)
+             VALUES ('qq','66666','p1',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // 一开始没忽视
+    // 这个接口是给接入方用的，走 API token
+    let j: serde_json::Value = S::client()
+        .get(format!(
+            "{}/v1/person/ignored?channel=qq&account=66666",
+            s.base
+        ))
+        .header("x-api-token", TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["ignored"], false);
+    assert_eq!(j["display_name"], "讨厌鬼");
+
+    // 勾上忽视
+    let r = S::client()
+        .patch(format!("{}/api/admin/person/p1", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"ignored": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let j: serde_json::Value = S::client()
+        .get(format!(
+            "{}/v1/person/ignored?channel=qq&account=66666",
+            s.base
+        ))
+        .header("x-api-token", TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["ignored"], true);
+
+    // 他的消息不该入库
+    let r = S::client()
+        .post(format!("{}/v1/message", s.base))
+        .header("x-api-token", TOKEN)
+        .json(&serde_json::json!({
+            "channel":"qq","account":"66666","content":"我偏要说","at_ms":1000
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["inserted"], false, "被忽视的人的消息不该写进去：{j}");
+    assert_eq!(j["ignored"], true);
+
+    let n: i64 = s
+        .db
+        .with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM channel_message", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(n, 0);
 }

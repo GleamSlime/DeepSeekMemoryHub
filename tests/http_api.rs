@@ -3179,3 +3179,58 @@ async fn 自定义渠道用默认可信度算权重() {
         .unwrap();
     assert!(!j.as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn 被忽视的人的事件不落库() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms, ignored)
+             VALUES ('p1','烦人精','confirmed',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({
+                "channel":"qq","kind":"said","summary":"他又来了",
+                "person_id":"p1","dedup_key":"ig-1"
+            }),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert!(j["id"].is_null(), "被忽视的人的事件不该真的写进去：{j}");
+
+    let n: i64 =
+        s.db.with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get(0))?))
+            .unwrap();
+    assert_eq!(n, 0);
+
+    // 没有 person_id 的事件（比如世界事件）不受影响
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({"channel":"mc","kind":"rain","summary":"下雨了"}),
+        )
+        .await;
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert!(!j["id"].is_null(), "无主事件照常写：{j}");
+}
+
+#[tokio::test]
+async fn 没绑过账号的人不算被忽视() {
+    let s = TestServer::start().await;
+    let j: serde_json::Value = s
+        .get("/v1/person/ignored?channel=qq&account=nobody")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["ignored"], false, "不认识不等于忽视：{j}");
+    assert!(j["person_id"].is_null());
+}

@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 /// 数据库句柄。
 ///
@@ -256,6 +256,11 @@ impl Db {
             // （哪段进了、哪段超预算），真正的文本在插件手里 ——
             // 不存下来的话，面板上永远只能看到一行摘要，排查时要翻日志。
             add_column_if_missing(tx, "injection_replay", "full_text", "TEXT")?;
+            // 「忽视」：这个人的请求不回复、不入库。
+            // 放在身份上而不是关系上 —— 关系是「我怎么看这个人」（数值），
+            // 忽视是「要不要处理这个人」（开关），两个维度，混在一起会让
+            // 「陌生但不想理」和「亲近但拉黑」都表达不出来。
+            add_column_if_missing(tx, "person", "ignored", "INTEGER NOT NULL DEFAULT 0")?;
 
             // ---------------------------------------------------------- 结构迁移 v7
             //
@@ -402,7 +407,9 @@ CREATE TABLE IF NOT EXISTS person (
   display_name TEXT NOT NULL,
   status       TEXT NOT NULL,          -- pending / confirmed
   created_ms   INTEGER NOT NULL,
-  note         TEXT
+  note         TEXT,
+  -- 1 = 忽视：这个人的消息不回复、不入库（面板「身份」页勾选）
+  ignored      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS person_account (

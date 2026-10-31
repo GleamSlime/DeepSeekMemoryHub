@@ -523,6 +523,16 @@ async fn post_message(
     Json(m): Json<MessageDto>,
 ) -> A<serde_json::Value> {
     crate::http::check_token(&st, &headers)?;
+    // 被忽视的人说的话：不入库。
+    // 判断按「渠道 + 账号」查 —— 对方手里只有 QQ 号，没有 person_id。
+    if let Some(acc) = m.account.as_deref().filter(|s| !s.trim().is_empty()) {
+        if crate::query::is_ignored(&st.db, &m.channel, acc)? {
+            tracing::info!("忽略：{}/{} 被设为忽视，消息未入库", m.channel, acc);
+            return Ok(Json(
+                serde_json::json!({"ok": true, "inserted": false, "ignored": true}),
+            ));
+        }
+    }
     let db = st.db.clone();
     // 空串 message_id 必须归一成 NULL：`channel_message` 上有
     // `UNIQUE(channel, message_id) WHERE message_id IS NOT NULL`，

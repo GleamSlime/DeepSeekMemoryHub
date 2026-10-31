@@ -732,7 +732,8 @@ async function renderTable(c, page){
       <td><b>${esc(p.display_name)}</b></td>
       <td><span class="badge ${p.status==='confirmed'?'b-ok':'b-warn'}">${p.status==='confirmed'?'已确认':'待确认'}</span></td>
       <td>${sceneLine(p.scenes)}</td>
-      <td>${p.accounts.map(a=>chantBadge(a.channel)+' <span class="mono dim">'+esc(a.account.slice(0,14))+'</span>').join(' ')}</td>
+      <td>${p.accounts.map(a=>chantBadge(a.channel)+' <span class="mono dim">'+esc(a.account.slice(0,14))+'</span>').join(' ')}
+        ${p.ignored?'<span class="badge b-err">忽视中</span>':''}</td>
       <td class="mono dim nowrap">${fmtTime(p.first_seen_ms||p.created_ms)}</td></tr>`).join('');
   }
 
@@ -920,6 +921,17 @@ async function renderTable(c, page){
         <label>身份备注 <span class="dim">（这人是谁；关系里发生的事写在关系页）</span></label>
         <input id="psNote" value="${esc(p.note||'')}" placeholder="可空，例如「服务器服主」">
       </div>
+      <div class="editrow">
+        <label>忽视这个人</label>
+        <span class="seg" id="psIgnored">
+          <button data-v="0" class="${p.ignored?'':'on'}">正常</button>
+          <button data-v="1" class="${p.ignored?'on':''}">忽视</button>
+        </span>
+        <span class="dim" style="font-size:11px;margin-top:4px">
+          忽视 = 不回复他的消息、也不把他的言行写进记忆。与关系数值无关：
+          「陌生但不想理」和「亲近但拉黑」都能表达。
+        </span>
+      </div>
 
       <div class="sectitle">各场景里的称呼 <span class="hint">留空 = 自动跟随渠道账号/群消息</span></div>
       <p class="dim" style="font-size:11.5px;margin:0 0 10px">
@@ -969,6 +981,9 @@ async function renderTable(c, page){
      <button id="psBind">绑定账号</button>
      <span class="sp"></span>`);
 
+    $('psIgnored').querySelectorAll('button').forEach(b=>{
+      b.onclick=()=>{$('psIgnored').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+    });
     $('psStatus').querySelectorAll('button').forEach(b=>{
       b.onclick=()=>{$('psStatus').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
     });
@@ -981,12 +996,14 @@ async function renderTable(c, page){
       try{
         const scenes={};
         (p.scenes||[]).forEach(sc=>{ const el=$('psSc_'+sc.scene); if(el) scenes[sc.scene]=el.value; });
+        const ig=$('psIgnored').querySelector('button.on');
         const r=await fetch(`/api/admin/person/${encodeURIComponent(p.person_id)}`,{
           method:'PATCH',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({
             display_name: $('psName').value,
             status: st ? st.dataset.v : undefined,
             note: $('psNote').value,
+            ignored: ig ? ig.dataset.v==='1' : undefined,
             scenes
           })});
         if(!r.ok){ let m=r.status+''; try{const j=await r.json(); if(j.error)m=j.error;}catch(_){} toast('保存失败：'+m,true); return; }

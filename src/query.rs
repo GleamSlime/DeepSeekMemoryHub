@@ -407,6 +407,8 @@ pub struct PersonItem {
     /// 各场景里的称呼（人工设置优先，否则按渠道账号/群消息推导）。
     /// 场景称呼的编辑入口在「身份」页——关系页只展示。
     pub scenes: Vec<SceneItem>,
+    /// 忽视：这个人的请求不回复、不入库（见 `is_ignored`）。
+    pub ignored: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -438,7 +440,7 @@ pub fn persons(db: &Db, q: Option<&str>, p: Page) -> Result<Paged<PersonItem>> {
         all.push(Box::new(p.offset()));
 
         let mut stmt = c.prepare(&format!(
-            "SELECT person_id, display_name, status, created_ms, note
+            "SELECT person_id, display_name, status, created_ms, note, ignored
              FROM person {where_sql} ORDER BY created_ms DESC LIMIT ? OFFSET ?"
         ))?;
         let mut items = stmt
@@ -453,6 +455,7 @@ pub fn persons(db: &Db, q: Option<&str>, p: Page) -> Result<Paged<PersonItem>> {
                         note: r.get(4)?,
                         accounts: Vec::new(),
                         scenes: Vec::new(),
+                        ignored: r.get::<_, i64>(5)? != 0,
                     })
                 },
             )?
@@ -760,6 +763,40 @@ pub fn self_narratives(db: &Db) -> Result<Vec<SelfNarrativeItem>> {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(items)
+    })
+}
+
+/// 这个人是否被设为「忽视」。
+///
+/// 用途：接入方在收到一条消息时先问一句，`ignored = true` 就直接丢弃，
+/// 不回复、不写记忆。判断放在服务端是因为 `person_id` ↔ 渠道账号的绑定
+/// 只有中枢知道，接入方手里只有一个 QQ 号。
+pub fn is_ignored(db: &Db, channel: &str, account: &str) -> Result<bool> {
+    db.with_read(|c| {
+        let n: i64 = c
+            .query_row(
+                "SELECT COALESCE(p.ignored, 0) FROM person_account pa
+             JOIN person p ON p.person_id = pa.person_id
+             WHERE pa.channel = ?1 AND pa.account = ?2",
+                rusqlite::params![channel, account],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(n != 0)
+    })
+}
+
+/// 按 `person_id` 查是否被忽视（面板与内部调用用）。
+pub fn person_ignored(db: &Db, person_id: &str) -> Result<bool> {
+    db.with_read(|c| {
+        let n: i64 = c
+            .query_row(
+                "SELECT ignored FROM person WHERE person_id = ?1",
+                rusqlite::params![person_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(n != 0)
     })
 }
 

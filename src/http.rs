@@ -308,6 +308,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/person/pending", get(pending_persons))
         .route("/v1/name/normalize", post(normalize_names))
         .route("/v1/channel/list", get(list_channels))
+        .route("/v1/person/ignored", get(person_ignored_check))
         .route("/v1/snapshot", post(take_snapshot))
         .route("/v1/snapshot/list", get(list_snapshots))
         .route("/v1/rollback", post(do_rollback))
@@ -711,6 +712,18 @@ async fn post_event(
     let channel = check_channel(&st, &body.channel)?;
     if body.summary.trim().is_empty() {
         return Err(Error::BadRequest("summary 不能为空".into()));
+    }
+    // 被忽视的人：整条丢弃。
+    // 为什么在写入侧也拦一次（而不只是回复侧）：接入方可能只接了「回复」那一路，
+    // 忘了在写记忆前调用。两头都拦，任何一个环节漏了都不会把他的话写进来。
+    if let Some(pid) = body.person_id.as_deref().filter(|s| !s.is_empty()) {
+        if crate::query::person_ignored(&st.db, pid)? {
+            tracing::info!("忽略：person {pid} 被设为忽视，事件未入库");
+            return Ok(Json(WriteResult {
+                id: None,
+                duplicate: false,
+            }));
+        }
     }
     if !(0.0..=1.0).contains(&body.importance) {
         return Err(Error::BadRequest("importance 必须在 [0,1]".into()));
@@ -2418,6 +2431,73 @@ async fn list_channels(
         .await
         .map_err(|e| Error::Storage(format!("渠道查询失败：{e}")))??;
     Ok(Json(items))
+}
+
+#[derive(Deserialize)]
+struct IgnoredQuery {
+    channel: String,
+    account: String,
+}
+
+#[derive(Serialize)]
+struct IgnoredOut {
+    /// true = 这个人被设为「忽视」，别回复、别写记忆。
+    ignored: bool,
+    /// 这个账号绑到的人（没绑过账号时为 null）。
+    ///
+    /// 为什么返回它：接入方排查「为什么他不回我」时，需要区分
+    /// 「没绑账号所以没匹配上」和「绑了但被忽视了」。
+    person_id: Option<String>,
+    display_name: Option<String>,
+}
+
+/// 这个人要不要被忽视。接入方在回复前问一次（一次查询，很便宜）。
+///
+/// 为什么放服务端判断：`person_id` ↔ QQ 号的绑定只有中枢知道，
+/// 接入方手里只有一个账号字符串。
+async fn person_ignored_check(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<IgnoredQuery>,
+) -> ApiResult<IgnoredOut> {
+    check_token(&st, &headers)?;
+    let db = st.db.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<IgnoredOut> {
+        db.with_read(|c| {
+            let row = c
+                .query_row(
+                    "SELECT pa.person_id, p.display_name, p.ignored
+                     FROM person_account pa
+                     LEFT JOIN person p ON p.person_id = pa.person_id
+                     WHERE pa.channel = ?1 AND pa.account = ?2",
+                    rusqlite::params![q.channel, q.account],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .ok();
+            Ok(match row {
+                Some((pid, name, ign)) => IgnoredOut {
+                    ignored: ign.unwrap_or(0) != 0,
+                    person_id: Some(pid),
+                    display_name: name,
+                },
+                // 没绑过账号：不是「忽视」，是「还不认识」。照常回，只不跨渠道合并。
+                None => IgnoredOut {
+                    ignored: false,
+                    person_id: None,
+                    display_name: None,
+                },
+            })
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("忽视查询失败：{e}")))??;
+    Ok(Json(out))
 }
 
 // ------------------------------------------------------------------ 称呼归一

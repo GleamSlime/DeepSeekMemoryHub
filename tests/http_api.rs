@@ -2992,3 +2992,53 @@ async fn 注入回放按条目数组写入() {
     let j: serde_json::Value = r.json().await.unwrap();
     assert_eq!(j["inserted"], 0, "同毫秒应判重");
 }
+
+#[tokio::test]
+async fn 探针写出来的空日记会盖住真实日记() {
+    // 线上真发生过：用 `{"body":"x"}` 探接口连通性，写进去一篇 body="x" 的日记，
+    // 因为 `window_end_ms` 默认取「现在」，它成了**最新一篇**，
+    // 于是「昨天的日记」变成 x。
+    //
+    // 这条测试锁住的是**取日记的规则**：按 window_end_ms 取最新。
+    // 探针数据只能靠「写的人自己删」避免，接口不做内容判断 ——
+    // 所以这里断言的是：一篇更新的日记确实会顶替旧的那篇（预期行为），
+    // 提醒任何做探针的人「写完要删」。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO diary(id, kind, window_start_ms, window_end_ms, title, body,
+                               model, created_ms, updated_ms)
+             VALUES ('real','day',1,2,'真实日记','真的内容','t',1,1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO diary(id, kind, window_start_ms, window_end_ms, title, body,
+                               model, created_ms, updated_ms)
+             VALUES ('probe','day',1,999999,'',  'x','',999999,999999)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let j: serde_json::Value = s.get("/v1/context?q=日记").await.json().await.unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(text.contains('x'), "更新的探针行确实会顶上来：{text}");
+
+    // 删掉探针行之后，真实日记回来
+    let r = TestServer::client()
+        .delete(format!("{}/v1/diary/probe", s.base))
+        .header("x-api-token", TOKEN)
+        .json(&serde_json::json!({"note":"探针清理"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let j: serde_json::Value = s.get("/v1/context?q=日记").await.json().await.unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(
+        text.contains("真的内容"),
+        "删掉探针行后应回到真实日记：{text}"
+    );
+}

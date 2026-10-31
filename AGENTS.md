@@ -104,6 +104,22 @@ git add -A && git commit -m "一句话说清这步做了什么"
 - 提交前 `git status`，把不属于自己的改动单独 commit 或先沟通；
 - 每次提交粒度小，冲突时损失才小。
 
+## 5.1 探针数据：写完必须删（真踩过）
+
+2026-11-01 用 `POST /v1/diary {"body":"x"}` 验证接口连通性，忘了删 → 这篇 `x`
+因为 `window_end_ms` 默认取「现在」，成了**最新一篇**，第二天用户看到
+「昨天的日记是个 x」。同一批还留下 `journal summary='x'`、两条 live 探针弹幕。
+
+规矩：
+
+- 探针**优先用 `GET /v1/health` 和只读接口**，不要写业务表；
+- 真要写，就用可识别的值（`dedup_key: "probe-<ts>"`、`content: "探针测试…"`），
+  并在**同一次操作里**删掉（`DELETE /v1/{表}/{id}`，逻辑删除，可回滚）；
+- 忘记删时的补救：`select` 出来 → `DELETE` 接口逐条删，别直接 `sqlite3 delete`
+  （逻辑删除会写 `rollback_log`，能撤销；物理删除不能）。
+
+线上现有探针行的清理记录见 `rollback_log` 里 note = 「接口探针残留」。
+
 ## 6. 数据模型（schema 11）
 
 | 表 | 用途 |

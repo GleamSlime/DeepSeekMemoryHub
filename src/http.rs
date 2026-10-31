@@ -1857,17 +1857,15 @@ async fn get_context(
 
         // -------- 5. 上次的日记
         //
-        // 这段话如果就在问日记（「你日记里写了什么」「昨天记了啥」），
-        // 正文上限放宽：默认只给 80 字，而一篇日记常 200 字以上，
-        // **结尾那段（当晚最后发生的事）会被截掉**——恰恰是最常被追问的部分。
-        let diary_limit = if asks_about_diary(&needle) {
-            crate::context::DIARY_BODY_CHARS_FULL
-        } else {
-            crate::context::DIARY_BODY_CHARS
-        };
+        // 日记**总是给全文**（上限 600 字）。
+        //
+        // 为什么不按「这句话有没有提到日记」分两档：实测必然漏 ——
+        // 第一句问「读读你昨天的日记」，下一句追问「怎么还藏私，明明还有」
+        // 里没有「日记」二字，就退回 80 字，模型只能对着开头编。
+        // 一篇日记 200–450 字，整段上下文仍在预算内。
         match load_diary_block(&db) {
             Ok(Some((title, body))) => push(
-                crate::context::render_diary_with(title.as_deref(), &body, diary_limit),
+                crate::context::render_diary(title.as_deref(), &body),
                 crate::context::SEG_DIARY,
             ),
             Ok(None) => {}
@@ -1975,28 +1973,6 @@ fn load_events_block(db: &Db) -> Result<Vec<(i64, String)>> {
 
 /// 最近 8 条 QQ 消息。**要正序**（先说的在前），所以先倒序取 8 条再翻过来。
 ///
-/// 这句话是不是在问日记。
-///
-/// 只认几个明确说法，不做模糊匹配：误判的代价是「多给 240 字正文」，
-/// 漏判的代价是「模型答不出日记内容」——所以宁可宽一点。
-fn asks_about_diary(q: &str) -> bool {
-    const KEYS: &[&str] = &[
-        "日记",
-        "周记",
-        "手帐",
-        "手账",
-        "写了什么",
-        "写了啥",
-        "记了啥",
-        "记了什么",
-    ];
-    let q = q.trim();
-    if q.is_empty() {
-        return false;
-    }
-    KEYS.iter().any(|k| q.contains(k))
-}
-
 /// `scene` 决定取哪一半：群聊是 `group_id IS NOT NULL`，私聊是 `IS NULL`。
 ///
 /// 这个划分**只靠 `group_id` 是否为空**，所以写入口必须守住两件事：

@@ -2805,7 +2805,7 @@ async fn 群名片改名后称呼归一仍然认得出() {
 }
 
 #[tokio::test]
-async fn 问日记时正文给到结尾而不是只给开头() {
+async fn 日记总是给全文包括结尾() {
     let s = TestServer::start().await;
     // 一篇 200 字以上的日记，关键信息在**最后一段**（当晚谁来过）。
     let head = "本来打算天还黑着就把包里的石头归进箱子，等天亮了在屋边种点小麦。";
@@ -2822,7 +2822,8 @@ async fn 问日记时正文给到结尾而不是只给开头() {
     })
     .unwrap();
 
-    // 闲聊：80 字截断，结尾看不到
+    // 闲聊也要给全文：下一句追问「怎么还藏私」里没有「日记」二字，
+    // 按提问识别分档必然漏，所以不做了。
     let j: serde_json::Value = s
         .get("/v1/context?q=今天天气不错")
         .await
@@ -2831,7 +2832,7 @@ async fn 问日记时正文给到结尾而不是只给开头() {
         .unwrap();
     let text = j["text"].as_str().unwrap();
     assert!(text.contains("背包清空的一夜"), "日记段应该在：{text}");
-    assert!(!text.contains("搬什么家"), "闲聊不该给全篇");
+    assert!(text.contains("搬什么家"), "闲聊时也要给到结尾：{text}");
 
     // 问日记：给到结尾
     let j: serde_json::Value = s

@@ -344,13 +344,17 @@ pub fn render_group_scene(
 }
 
 /// 日记正文的截断长度。再长就是「把整篇日记塞进提示词」，不值。
-pub const DIARY_BODY_CHARS: usize = 80;
-/// 问「日记」时给的正文上限。
+/// 日记正文上限。
 ///
-/// 320 不够：实测一篇日记 231–450 字，而「读读昨天的日记」这种要求
-/// 是要它**照着念**，少一段就会被听出来。给到 600 —— 1000 预算下
-/// 整段上下文（含其它段）约 900 字，还有余量。
-pub const DIARY_BODY_CHARS_FULL: usize = 600;
+/// **不做「闲聊给 80 字、问日记给全文」的两档**（2026-10-31 修正）：
+/// 实测两档必踩坑 —— 第一句问「读读你昨天的日记」，第二句追问
+/// 「怎么还藏私，明明还有」时，那句话里没有「日记」两个字，
+/// 于是又退回 80 字，模型只能对着开头编，用户看到的就是「只念了一小段」。
+/// 一篇日记 200–450 字，整段上下文仍在 1200 预算内，不值得为省这 200 字
+/// 换一次「它答不出自己的日记」。
+pub const DIARY_BODY_CHARS: usize = 600;
+/// 兼容旧名字：两档合并成一个上限（见 `DIARY_BODY_CHARS` 的注释）。
+pub const DIARY_BODY_CHARS_FULL: usize = DIARY_BODY_CHARS;
 
 /// `# 你上次记的日记`：最新一篇的标题 + 正文前 80 字。
 pub fn render_diary(title: Option<&str>, body: &str) -> Option<String> {
@@ -736,21 +740,25 @@ mod tests {
     }
 
     #[test]
-    fn 日记_标题加正文前八十字() {
+    fn 日记_标题加正文() {
+        // 上限 600：一篇日记通常 200–450 字，整篇都要给（截到 80 会让
+        // 模型答不出「日记里是不是在说我坏话」）。
         let body = "今".repeat(200);
         let t = render_diary(Some("水边那两竿"), &body).unwrap();
         let line = t.lines().nth(1).unwrap();
         assert!(line.starts_with("《水边那两竿》今今今"), "实得 {line}");
-        assert!(line.ends_with('…'), "截断要有省略号：{line}");
-        assert_eq!(
-            line.chars().count(),
-            2 + 5 + 80 + 1,
-            "《》2 + 标题「水边那两竿」5 + 80字 + 省略号1"
-        );
+        assert!(!line.ends_with('…'), "200 字不该被截：{line}");
+
+        // 超长才截断，且带省略号。
+        let long = "明".repeat(700);
+        let t2 = render_diary(Some("长"), &long).unwrap();
+        let line2 = t2.lines().nth(1).unwrap();
+        assert!(line2.ends_with('…'), "超过上限要有省略号");
+        assert_eq!(line2.chars().count(), 2 + 1 + DIARY_BODY_CHARS + 1);
 
         // 短正文不加省略号。
-        let t2 = render_diary(None, "很短").unwrap();
-        assert_eq!(t2, "# 你上次记的日记\n很短");
+        let t3 = render_diary(None, "很短").unwrap();
+        assert_eq!(t3, "# 你上次记的日记\n很短");
     }
 
     #[test]

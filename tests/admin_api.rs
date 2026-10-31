@@ -1114,3 +1114,141 @@ async fn 没有会话也没有_token_仍然拒绝() {
         .unwrap();
     assert_eq!(r.status(), 401, "假会话必须被拒");
 }
+
+// ================================================================== 渠道维护
+
+#[tokio::test]
+async fn 渠道可以新增改名删除() {
+    let s = S::start().await;
+    let ck = s.login().await;
+
+    // 新增
+    let r = S::client()
+        .post(format!("{}/api/admin/channels", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"tag":"BiliBili","label":"B站直播","trust":0.75}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["tag"], "bilibili", "tag 要归一成小写");
+
+    // 列表里有它，且是自定义
+    let list: serde_json::Value = s
+        .get_with("/api/admin/channels", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let item = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["tag"] == "bilibili")
+        .unwrap();
+    assert_eq!(item["label"], "B站直播");
+    assert_eq!(item["builtin"], false);
+
+    // 改名 + 调可信度
+    let r = S::client()
+        .patch(format!("{}/api/admin/channels/bilibili", s.base))
+        .header("cookie", &ck)
+        .json(&serde_json::json!({"label":"哔哩哔哩","trust":0.6}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let list: serde_json::Value = s
+        .get_with("/api/admin/channels", &ck)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let item = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["tag"] == "bilibili")
+        .unwrap();
+    assert_eq!(item["label"], "哔哩哔哩");
+
+    // 删除
+    let r = S::client()
+        .delete(format!("{}/api/admin/channels/bilibili", s.base))
+        .header("cookie", &ck)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+#[tokio::test]
+async fn 内置渠道不能删_有数据的也不能删() {
+    let s = S::start().await;
+    let ck = s.login().await;
+
+    let r = S::client()
+        .delete(format!("{}/api/admin/channels/mc", s.base))
+        .header("cookie", &ck)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "内置渠道不能删");
+
+    // 自定义渠道但已有事件在用 → 也拒绝（提示先改掉那些事件）
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO channel(tag, label, trust, builtin, created_ms)
+             VALUES ('bilibili','B站',0.8,0,1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO event(at_ms, kind, channel, summary, importance, scope)
+             VALUES (1,'k','bilibili','弹幕',0.3,'companion')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let r = S::client()
+        .delete(format!("{}/api/admin/channels/bilibili", s.base))
+        .header("cookie", &ck)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "还有事件在引用时不该删掉");
+
+    // 逻辑删除那条事件之后就能删了（被遗忘的数据不算「在用」）
+    s.db.with_write(|tx| {
+        tx.execute(
+            "UPDATE event SET deleted_by = 1 WHERE channel = 'bilibili'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let r = S::client()
+        .delete(format!("{}/api/admin/channels/bilibili", s.base))
+        .header("cookie", &ck)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "只剩被遗忘的数据时应该能删");
+}
+
+#[tokio::test]
+async fn 渠道_tag_必须合法() {
+    let s = S::start().await;
+    let ck = s.login().await;
+    for bad in ["", "   ", "中文渠道", "has space", "UPPER!"] {
+        let r = S::client()
+            .post(format!("{}/api/admin/channels", s.base))
+            .header("cookie", &ck)
+            .json(&serde_json::json!({"tag": bad}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "tag {bad:?} 应被拒");
+    }
+}

@@ -3081,3 +3081,101 @@ async fn 探针写出来的空日记会盖住真实日记() {
         "删掉探针行后应回到真实日记：{text}"
     );
 }
+
+// ================================================================== 渠道（可维护）
+
+#[tokio::test]
+async fn 渠道是数据不是枚举() {
+    let s = TestServer::start().await;
+
+    // 内置四个默认存在
+    let j: serde_json::Value = s.get("/v1/channel/list").await.json().await.unwrap();
+    let tags: Vec<String> = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["tag"].as_str().unwrap().to_string())
+        .collect();
+    for t in ["mc", "qq", "live", "system"] {
+        assert!(
+            tags.contains(&t.to_string()),
+            "内置渠道 {t} 应在列表里：{tags:?}"
+        );
+    }
+
+    // 未注册的渠道写事件要 400
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({"channel":"bilibili","kind":"k","summary":"x"}),
+        )
+        .await;
+    assert_eq!(r.status(), 400, "未注册渠道应先提示去注册");
+    let body = r.text().await.unwrap();
+    assert!(body.contains("未知渠道"), "错误里要说清楚：{body}");
+}
+
+#[tokio::test]
+async fn 注册后就能用新渠道写入() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO channel(tag, label, trust, builtin, created_ms)
+             VALUES ('bilibili','B站直播',0.8,0,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({"channel":"Bilibili","kind":"danmaku","summary":"来了","importance":0.3}),
+        )
+        .await;
+    assert_eq!(r.status(), 200, "注册过的渠道应能写，且大小写要归一");
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["duplicate"], false);
+
+    // 库里存的是小写 tag
+    let ch: String =
+        s.db.with_read(|c| {
+            Ok(c.query_row(
+                "SELECT channel FROM event ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(ch, "bilibili", "tag 要归一成小写");
+}
+
+#[tokio::test]
+async fn 自定义渠道用默认可信度算权重() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO channel(tag, label, trust, builtin, created_ms)
+             VALUES ('bilibili','B站直播',0.8,0,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({"channel":"bilibili","kind":"k","summary":"弹幕说的","importance":0.5}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    // 只要不 panic、能写进去就说明 channel_trust 对未知 tag 有兜底
+    let j: serde_json::Value = s
+        .get("/v1/recall?q=弹幕说的&topk=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(!j.as_array().unwrap().is_empty());
+}

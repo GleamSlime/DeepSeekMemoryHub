@@ -307,6 +307,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/person/bind", post(bind_person))
         .route("/v1/person/pending", get(pending_persons))
         .route("/v1/name/normalize", post(normalize_names))
+        .route("/v1/channel/list", get(list_channels))
         .route("/v1/snapshot", post(take_snapshot))
         .route("/v1/snapshot/list", get(list_snapshots))
         .route("/v1/rollback", post(do_rollback))
@@ -414,6 +415,24 @@ pub(crate) fn check_token_or_session(state: &AppState, headers: &HeaderMap) -> R
         return Ok(());
     }
     Err(Error::Unauthorized)
+}
+
+/// 校验渠道 tag 是否已注册，返回规范化后的 tag（小写、去空白）。
+///
+/// 渠道从编译期枚举改成了 `channel` 表里的数据：加一个平台不用改代码，
+/// 但要**先注册**再用。这样拼错的 tag（`Qq ` / `qqq`）会当场 400，
+/// 而不是悄悄写进库、变成面板上一个谁也认不出的渠道名。
+pub(crate) fn check_channel(st: &AppState, tag: &str) -> Result<String> {
+    let normalized = tag.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(Error::BadRequest("channel 不能为空".into()));
+    }
+    if crate::query::channel_exists(&st.db, &normalized)? {
+        return Ok(normalized);
+    }
+    Err(Error::BadRequest(format!(
+        "未知渠道：{tag}（可用渠道见 GET /v1/channel/list，面板「渠道」页可新增）"
+    )))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -689,8 +708,7 @@ async fn post_event(
 ) -> ApiResult<WriteResult> {
     check_token_or_session(&st, &headers)?;
 
-    let channel = Channel::parse(&body.channel)
-        .ok_or_else(|| Error::BadRequest(format!("未知渠道：{}", body.channel)))?;
+    let channel = check_channel(&st, &body.channel)?;
     if body.summary.trim().is_empty() {
         return Err(Error::BadRequest("summary 不能为空".into()));
     }
@@ -856,7 +874,7 @@ async fn list_events(
                         &weight::WeightInput::fresh(
                             importance,
                             FactTier::Extracted,
-                            Channel::parse(&channel).unwrap_or(Channel::System),
+                            channel.clone(),
                             at_ms,
                         ),
                         now,
@@ -923,10 +941,9 @@ async fn post_fact(
     // 不影响存什么。所以留空回退到 system，而不是报错——
     // 早先这里直接 parse 空串，导致「不传 channel 就 400」，实测踩到。
     let channel = if body.channel.trim().is_empty() {
-        Channel::System
+        "system".to_string()
     } else {
-        Channel::parse(&body.channel)
-            .ok_or_else(|| Error::BadRequest(format!("未知渠道：{}", body.channel)))?
+        check_channel(&st, &body.channel)?
     };
     if body.key.trim().is_empty() {
         return Err(Error::BadRequest("key 不能为空".into()));
@@ -948,7 +965,7 @@ async fn post_fact(
         .unwrap_or_else(|e| e.into_inner().clone());
     let w = weight::compute(
         &wcfg,
-        &weight::WeightInput::fresh(body.importance, tier, channel, now),
+        &weight::WeightInput::fresh(body.importance, tier, channel.clone(), now),
         now,
     );
 
@@ -1340,7 +1357,7 @@ fn load_candidates(c: &rusqlite::Connection, now: i64) -> Result<Vec<Candidate>>
                 win: weight::WeightInput::fresh(
                     importance,
                     FactTier::Extracted,
-                    Channel::parse(&channel).unwrap_or(Channel::System),
+                    channel.clone(),
                     at_ms,
                 ),
             });
@@ -1379,7 +1396,7 @@ fn load_candidates(c: &rusqlite::Connection, now: i64) -> Result<Vec<Candidate>>
                     // 手帐是**发生过的事**，不是人写下的规矩 —— 按 Extracted
                     // 参与衰减。curated 只留给「人亲手写下的事实」。
                     tier: FactTier::Extracted,
-                    channel: Channel::parse(&channel).unwrap_or(Channel::Mc),
+                    channel,
                     at_ms,
                     recall_count,
                 },
@@ -1412,7 +1429,7 @@ fn load_candidates(c: &rusqlite::Connection, now: i64) -> Result<Vec<Candidate>>
                 win: weight::WeightInput {
                     importance,
                     tier,
-                    channel: Channel::System,
+                    channel: "system".to_string(),
                     at_ms: updated_ms,
                     recall_count,
                 },
@@ -2281,16 +2298,14 @@ async fn bind_person(
     Json(body): Json<BindRequest>,
 ) -> ApiResult<BindResult> {
     check_token(&st, &headers)?;
-    // 解析一次，既做校验也拿到规范形式（`MC` / `Mc` 都归一成 `mc`）。
-    // 否则库里会同时出现 "mc" 和 "MC"，绑定按字符串精确匹配就查不到。
-    let channel = Channel::parse(&body.channel)
-        .ok_or_else(|| Error::BadRequest(format!("未知渠道：{}", body.channel)))?;
+    // 校验并归一（`MC` / `Mc` 都成 `mc`），否则库里会同时出现 "mc" 和 "MC"，
+    // 绑定按字符串精确匹配就查不到。
+    let ch = check_channel(&st, &body.channel)?;
     if body.account.trim().is_empty() || body.person_id.trim().is_empty() {
         return Err(Error::BadRequest("account 与 person_id 都不能为空".into()));
     }
 
     let db = st.db.clone();
-    let ch = channel.as_str().to_string();
     let acct = body.account.clone();
     let pid = body.person_id.clone();
     let seen = body.seen_name.clone();
@@ -2390,6 +2405,19 @@ async fn pending_persons(
     .await
     .map_err(|e| Error::Storage(format!("查询任务失败：{e}")))??;
     Ok(Json(rows))
+}
+
+/// 列出可用渠道。接入方在写之前可以先问一下有哪些 tag。
+async fn list_channels(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Vec<crate::query::ChannelItem>> {
+    check_token(&st, &headers)?;
+    let db = st.db.clone();
+    let items = tokio::task::spawn_blocking(move || crate::query::channels(&db))
+        .await
+        .map_err(|e| Error::Storage(format!("渠道查询失败：{e}")))??;
+    Ok(Json(items))
 }
 
 // ------------------------------------------------------------------ 称呼归一

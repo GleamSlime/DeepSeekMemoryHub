@@ -763,6 +763,54 @@ pub fn self_narratives(db: &Db) -> Result<Vec<SelfNarrativeItem>> {
     })
 }
 
+// ------------------------------------------------------------------ 渠道
+
+#[derive(Debug, Serialize)]
+pub struct ChannelItem {
+    pub tag: String,
+    pub label: String,
+    pub trust: f64,
+    /// 内置渠道（mc/qq/live/system）不允许删除：历史数据全靠它们。
+    pub builtin: bool,
+    /// 这个渠道有多少条事件。删之前先看有没有人用。
+    pub events: i64,
+}
+
+/// 列出全部渠道（含内置）。按内置优先、再按 tag 排。
+pub fn channels(db: &Db) -> Result<Vec<ChannelItem>> {
+    db.with_read(|c| {
+        let mut stmt = c.prepare(
+            "SELECT ch.tag, ch.label, ch.trust, ch.builtin,
+                    (SELECT COUNT(*) FROM event e WHERE e.channel = ch.tag)
+             FROM channel ch ORDER BY ch.builtin DESC, ch.tag",
+        )?;
+        let items = stmt
+            .query_map([], |r| {
+                Ok(ChannelItem {
+                    tag: r.get(0)?,
+                    label: r.get(1)?,
+                    trust: r.get(2)?,
+                    builtin: r.get::<_, i64>(3)? != 0,
+                    events: r.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(items)
+    })
+}
+
+/// 渠道 tag 是否已注册。
+pub fn channel_exists(db: &Db, tag: &str) -> Result<bool> {
+    db.with_read(|c| {
+        let n: i64 = c.query_row(
+            "SELECT COUNT(*) FROM channel WHERE tag = ?1",
+            rusqlite::params![tag],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    })
+}
+
 // ------------------------------------------------------------------ 关系
 
 #[derive(Debug, Serialize)]

@@ -69,6 +69,14 @@ pub fn router(state: AdminState) -> Router {
             get(api_relations).post(api_create_relation),
         )
         .route(
+            "/api/admin/channels",
+            get(api_channels).post(api_create_channel),
+        )
+        .route(
+            "/api/admin/channels/{tag}",
+            axum::routing::patch(api_patch_channel).delete(api_delete_channel),
+        )
+        .route(
             "/api/admin/relations/{person_id}",
             axum::routing::patch(api_patch_relation),
         )
@@ -910,6 +918,179 @@ async fn api_patch_relation(
     .map_err(|e| Error::Storage(format!("编辑关系失败：{e}")))??;
 
     Ok(Json(serde_json::json!({ "ok": true, "person_id": id })))
+}
+
+async fn api_channels(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<Vec<query::ChannelItem>> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let items = tokio::task::spawn_blocking(move || query::channels(&db))
+        .await
+        .map_err(|e| Error::Storage(format!("渠道查询失败：{e}")))??;
+    Ok(Json(items))
+}
+
+#[derive(Deserialize)]
+struct NewChannel {
+    tag: String,
+    label: Option<String>,
+    trust: Option<f64>,
+}
+
+/// 规范化渠道 tag：小写、去空白，只允许 `[a-z0-9_-]`。
+///
+/// 允许的字符集是刻意窄的：tag 会出现在 URL、SQL 参数和面板的筛选按钮上，
+/// 放开中文/空格会让每个使用点都要额外转义一次。
+fn norm_tag(raw: &str) -> Result<String> {
+    let t = raw.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return Err(Error::BadRequest("tag 不能为空".into()));
+    }
+    if t.len() > 32 {
+        return Err(Error::BadRequest("tag 最长 32 个字符".into()));
+    }
+    if !t
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(Error::BadRequest(
+            "tag 只能用小写字母、数字、下划线和连字符".into(),
+        ));
+    }
+    Ok(t)
+}
+
+async fn api_create_channel(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(b): Json<NewChannel>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let tag = norm_tag(&b.tag)?;
+    let label = b
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&tag)
+        .to_string();
+    let trust = b.trust.unwrap_or(0.8);
+    if !(0.0..=1.0).contains(&trust) {
+        return Err(Error::BadRequest("trust 必须在 [0,1]".into()));
+    }
+    let db = st.app.db.clone();
+    let tag2 = tag.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let exists: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM channel WHERE tag = ?1",
+                rusqlite::params![tag2],
+                |r| r.get(0),
+            )?;
+            if exists > 0 {
+                return Err(Error::BadRequest(format!("渠道 {tag2} 已存在")));
+            }
+            tx.execute(
+                "INSERT INTO channel(tag, label, trust, builtin, created_ms)
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                rusqlite::params![tag2, label, trust, crate::db::now_ms()],
+            )?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("新建渠道失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true, "tag": tag })))
+}
+
+#[derive(Deserialize)]
+struct ChannelPatch {
+    label: Option<String>,
+    trust: Option<f64>,
+}
+
+async fn api_patch_channel(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(tag): axum::extract::Path<String>,
+    Json(b): Json<ChannelPatch>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    if let Some(t) = b.trust {
+        if !(0.0..=1.0).contains(&t) {
+            return Err(Error::BadRequest("trust 必须在 [0,1]".into()));
+        }
+    }
+    let db = st.app.db.clone();
+    let tag2 = tag.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM channel WHERE tag = ?1",
+                rusqlite::params![tag2],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("渠道 {tag2}")));
+            }
+            tx.execute(
+                "UPDATE channel SET
+                   label = COALESCE(?1, label),
+                   trust = COALESCE(?2, trust)
+                 WHERE tag = ?3",
+                rusqlite::params![b.label, b.trust, tag2],
+            )?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("编辑渠道失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true, "tag": tag })))
+}
+
+async fn api_delete_channel(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(tag): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let builtin: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(builtin), 0) FROM channel WHERE tag = ?1",
+                rusqlite::params![tag],
+                |r| r.get(0),
+            )?;
+            if builtin == 1 {
+                return Err(Error::BadRequest(
+                    "内置渠道不能删除（历史数据全靠这四个 tag）".into(),
+                ));
+            }
+            // 有数据就不让删：重建一个同 tag 的渠道很容易，但记忆里的
+            // 「这条来自哪个渠道」一旦指向不存在的 tag，面板上就只剩一个
+            // 谁也认不出的字符串。先让人把数据改掉再删。
+            // 只算**还有效**的事件：被逻辑删除的不算「在用」，
+            // 否则删过一次的渠道就永远删不掉了。
+            let events: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM event WHERE channel = ?1 AND deleted_by IS NULL",
+                rusqlite::params![tag],
+                |r| r.get(0),
+            )?;
+            if events > 0 {
+                return Err(Error::BadRequest(format!(
+                    "渠道 {tag} 还有 {events} 条事件在用，先改掉或删掉它们"
+                )));
+            }
+            tx.execute("DELETE FROM channel WHERE tag = ?1", rusqlite::params![tag])?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("删除渠道失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn api_traits(

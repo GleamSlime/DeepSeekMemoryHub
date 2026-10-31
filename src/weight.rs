@@ -28,7 +28,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Channel, FactTier};
+use crate::model::FactTier;
 
 /// 一天的毫秒数，衰减计算的基本单位。
 pub const DAY_MS: i64 = 86_400_000;
@@ -80,6 +80,8 @@ pub struct WeightConfig {
     pub channel_trust_qq: f64,
     pub channel_trust_live: f64,
     pub channel_trust_system: f64,
+    /// 自定义渠道的默认可信度。内置四个以外的渠道都按这个算。
+    pub channel_trust_default: f64,
 }
 
 impl Default for WeightConfig {
@@ -95,6 +97,7 @@ impl Default for WeightConfig {
             channel_trust_qq: 0.9,
             channel_trust_live: 0.8,
             channel_trust_system: 1.0,
+            channel_trust_default: 0.8,
         }
     }
 }
@@ -122,6 +125,7 @@ impl WeightConfig {
             ("channel_trust_qq", self.channel_trust_qq),
             ("channel_trust_live", self.channel_trust_live),
             ("channel_trust_system", self.channel_trust_system),
+            ("channel_trust_default", self.channel_trust_default),
         ] {
             if !v.is_finite() || v < 0.0 {
                 return Err(format!("{name} 必须是非负有限数"));
@@ -130,12 +134,17 @@ impl WeightConfig {
         Ok(())
     }
 
-    pub fn channel_trust(&self, channel: Channel) -> f64 {
+    /// 渠道可信度。内置四个走各自字段；**自定义渠道**落到 `channel_trust_default`。
+    ///
+    /// 这样加一个新渠道（比如 `bilibili`）不需要改代码：加一行数据、
+    /// 想单独调可信度就在面板上填，懒得调就用默认值。
+    pub fn channel_trust(&self, channel: &str) -> f64 {
         match channel {
-            Channel::Mc => self.channel_trust_mc,
-            Channel::Qq => self.channel_trust_qq,
-            Channel::Live => self.channel_trust_live,
-            Channel::System => self.channel_trust_system,
+            "mc" => self.channel_trust_mc,
+            "qq" => self.channel_trust_qq,
+            "live" => self.channel_trust_live,
+            "system" => self.channel_trust_system,
+            _ => self.channel_trust_default,
         }
     }
 
@@ -170,7 +179,9 @@ impl WeightConfig {
 pub struct WeightInput {
     pub importance: f64,
     pub tier: FactTier,
-    pub channel: Channel,
+    /// 渠道 tag（可自定义）。用字符串而不是枚举：
+    /// 渠道集合现在是**可维护的数据**（`channel` 表），不是编译期常量。
+    pub channel: String,
     /// 这条记忆发生的时间。
     pub at_ms: i64,
     /// 这条记忆被回忆过多少次。
@@ -179,11 +190,11 @@ pub struct WeightInput {
 
 impl WeightInput {
     /// 一次都没被回忆过的输入，用于写入时打分。
-    pub fn fresh(importance: f64, tier: FactTier, channel: Channel, at_ms: i64) -> Self {
+    pub fn fresh(importance: f64, tier: FactTier, channel: impl Into<String>, at_ms: i64) -> Self {
         Self {
             importance,
             tier,
-            channel,
+            channel: channel.into(),
             at_ms,
             recall_count: 0,
         }
@@ -206,7 +217,7 @@ pub fn compute(cfg: &WeightConfig, input: &WeightInput, now_ms: i64) -> f64 {
     }
 
     let reinforce = cfg.reinforce(input.recall_count);
-    let trust = cfg.channel_trust(input.channel);
+    let trust = cfg.channel_trust(&input.channel);
 
     base * decay * reinforce * trust
 }
@@ -220,7 +231,7 @@ mod tests {
     }
 
     fn inp(importance: f64, at_ms: i64) -> WeightInput {
-        WeightInput::fresh(importance, FactTier::Extracted, Channel::Mc, at_ms)
+        WeightInput::fresh(importance, FactTier::Extracted, "mc".to_string(), at_ms)
     }
 
     #[test]
@@ -306,12 +317,12 @@ mod tests {
         let old = now - 3650 * DAY_MS;
         let extracted = compute(
             &c,
-            &WeightInput::fresh(1.0, FactTier::Extracted, Channel::Mc, old),
+            &WeightInput::fresh(1.0, FactTier::Extracted, "mc".to_string(), old),
             now,
         );
         let curated = compute(
             &c,
-            &WeightInput::fresh(1.0, FactTier::Curated, Channel::Mc, old),
+            &WeightInput::fresh(1.0, FactTier::Curated, "mc", old),
             now,
         );
         assert!(curated > extracted, "人写的应比推断的更抗衰减");
@@ -327,12 +338,12 @@ mod tests {
         let now = 1_000_000_000_000;
         let mc = compute(
             &c,
-            &WeightInput::fresh(1.0, FactTier::Extracted, Channel::Mc, now),
+            &WeightInput::fresh(1.0, FactTier::Extracted, "mc".to_string(), now),
             now,
         );
         let live = compute(
             &c,
-            &WeightInput::fresh(1.0, FactTier::Extracted, Channel::Live, now),
+            &WeightInput::fresh(1.0, FactTier::Extracted, "live".to_string(), now),
             now,
         );
         assert!(mc > live, "MC 亲历应比弹幕更可信：mc={mc} live={live}");

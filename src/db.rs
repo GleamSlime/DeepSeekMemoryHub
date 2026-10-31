@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 12;
+pub const SCHEMA_VERSION: i32 = 13;
 
 /// 数据库句柄。
 ///
@@ -269,6 +269,22 @@ impl Db {
             // 那些 `hub-selftest` / `大肥鱼.locations` 是脏数据，不该保留多个身份。
             migrate_to_single_owner(tx)?;
 
+            // 内置渠道必须存在：存量数据里到处是这四个 tag，
+            // 删掉它们会让历史记录在面板上显示成「未知渠道」。
+            for (tag, label, trust) in [
+                ("mc", "Minecraft", 1.0),
+                ("qq", "QQ", 0.9),
+                ("live", "直播", 0.8),
+                ("system", "系统", 1.0),
+            ] {
+                tx.execute(
+                    "INSERT INTO channel(tag, label, trust, builtin, created_ms)
+                     VALUES (?1, ?2, ?3, 1, ?4)
+                     ON CONFLICT(tag) DO UPDATE SET builtin = 1",
+                    rusqlite::params![tag, label, trust, now_ms()],
+                )?;
+            }
+
             if found < SCHEMA_VERSION {
                 tx.execute(
                     "INSERT INTO schema_version(version, applied_ms) VALUES (?1, ?2)",
@@ -330,6 +346,7 @@ impl Db {
 
 /// 所有业务表。`counts()` 与快照校验都按这个列表走。
 pub const TABLES: &[&str] = &[
+    "channel",
     "person",
     "person_account",
     "person_scene",
@@ -367,6 +384,19 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- ============================================================ 身份
 -- 跨渠道的「谁」。MC=UUID / QQ=QQ号 / 直播=平台uid，三套 id 天然不通，
 -- 这一层就是让它们能指向同一个人。
+-- 渠道注册表。原本 `channel` 是编译期枚举（mc/qq/live/system），
+-- 加一个平台就要改代码、改枚举、改权重字段。改成数据之后：
+--   · 接入方直接用一个新 tag（`bilibili`、`wechat`…），只要它在表里就合法；
+--   · 面板能增删改，可信度也挂在这里；
+--   · `builtin = 1` 的四行不允许删除（存量数据里到处是它们）。
+CREATE TABLE IF NOT EXISTS channel (
+  tag         TEXT PRIMARY KEY,
+  label       TEXT NOT NULL,
+  trust       REAL NOT NULL DEFAULT 0.8,
+  builtin     INTEGER NOT NULL DEFAULT 0,
+  created_ms  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS person (
   person_id    TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,

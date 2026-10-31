@@ -470,6 +470,7 @@ const PAGES = {
   messages:  {title:'群消息',   icon:'💬', url:'/api/admin/messages'},
   replay:    {title:'注入回放', icon:'🔍', url:'/api/admin/recall-traces'},
   kb:        {title:'知识库',   icon:'📚', url:'/api/admin/kb'},
+  channels:  {title:'渠道',     icon:'🔌', url:'/api/admin/channels'},
   settings:  {title:'配置',     icon:'🎛', url:'/api/admin/settings'},
   persons:   {title:'身份',     icon:'👥', url:'/api/admin/persons'},
   snapshots: {title:'快照',     icon:'💾', url:'/api/admin/snapshots'},
@@ -482,11 +483,20 @@ const NAV_GROUPS = [
   {label:'知识库', items:['kb']},
   {label:'规划', items:['plans']},
   {label:'人格', items:['mood','self','relations','traits','promises']},
-  {label:'渠道', items:['messages']},
+  {label:'渠道', items:['channels','messages']},
   {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
 ];
 
 let state = { page:'overview', params:{}, overview:null };
+/// 可用渠道（从 /api/admin/channels 拉；拉不到就退回内置四个）。
+/// 面板里所有「渠道」选项都从这里来，不能写死 —— 用户能自己加渠道。
+let CHANNELS = ['mc','qq','live','system'];
+async function loadChannels(){
+  try{
+    const items = await api('/api/admin/channels');
+    if(Array.isArray(items) && items.length) CHANNELS = items.map(x=>x.tag);
+  }catch(e){ /* 保留内置默认值 */ }
+}
 const counts = {};
 
 function renderNav(){
@@ -535,6 +545,7 @@ async function render(){
     // 实测 2026-10-30：用户报「只显示了[注入回放 共 30 条]其余什么也没显示」。
     if(state.page==='replay') return await renderReplay(c);
     if(state.page==='kb') return await renderKb(c);
+    if(state.page==='channels') return await renderChannels(c);
     // 「配置」也有专用渲染函数。少了这一行它会掉进 renderTable 兜底，
     // 而 renderTable 不认 'settings' —— 于是整页只剩一个空的筛选栏，
     // 用户看到的就是「配置菜单里什么也没有」。
@@ -1029,7 +1040,7 @@ const CREATE_FORMS = {
   events: ()=>({
     title:'新增事件',
     fields:[
-      {k:'channel', l:'渠道', seg:['mc','qq','live','system'], v:'mc'},
+      {k:'channel', l:'渠道', seg:CHANNELS.slice(), v:'mc'},
       {k:'kind', l:'类型', v:'manual', hint:'如 task_done / attacked / discovery'},
       {k:'summary', l:'摘要', text:true, req:true, hint:'会进提示词'},
       {k:'importance', l:'重要度', range:true, v:0.5},
@@ -1041,7 +1052,7 @@ const CREATE_FORMS = {
   facts: ()=>({
     title:'新增事实',
     fields:[
-      {k:'channel', l:'渠道', seg:['mc','qq','live'], v:'mc'},
+      {k:'channel', l:'渠道', seg:CHANNELS.slice(), v:'mc'},
       {k:'key', l:'键', v:'', req:true, hint:'同一个 key 会覆盖旧版本（旧的保留为历史）'},
       {k:'value', l:'值', text:true, req:true},
       {k:'tier', l:'层级', seg:['curated','extracted'], v:'extracted', hint:'人写的不随时间衰减'},
@@ -1054,7 +1065,7 @@ const CREATE_FORMS = {
     title:'新增手帐',
     fields:[
       {k:'type_', l:'类型', v:'other', hint:'task_done / task_failed / discovery / preference…'},
-      {k:'channel', l:'渠道', seg:['mc','qq','live'], v:'mc'},
+      {k:'channel', l:'渠道', seg:CHANNELS.slice(), v:'mc'},
       {k:'summary', l:'摘要', text:true, req:true},
       {k:'details', l:'细节', text:true},
       {k:'importance', l:'重要度', range:true, v:0.5},
@@ -1203,7 +1214,7 @@ function filterBar(page, p){
     ${opts.map(([v,t])=>`<button data-v="${v}" class="${(cur||'')===v?'on':''}">${t}</button>`).join('')}
   </span>`;
   if(page==='events'){
-    f.push(seg('fChannel',[['','全部'],['mc','MC'],['qq','QQ'],['live','直播'],['system','系统']],p.channel));
+    f.push(seg('fChannel',[['','全部']].concat(CHANNELS.map(t=>[t,t])),p.channel));
     f.push(seg('fForgot',[['','仅有效'],['1','含已遗忘']],p.forgotten));
   }
   if(page==='facts'){
@@ -1214,7 +1225,7 @@ function filterBar(page, p){
     f.push(seg('fKind',[['','全部'],['day','日'],['week','周'],['month','月']],p.kind));
   }
   if(page==='messages'){
-    f.push(seg('fChannel',[['','全部'],['qq','QQ'],['live','直播']],p.channel));
+    f.push(seg('fChannel',[['','全部']].concat(CHANNELS.map(t=>[t,t])),p.channel));
   }
   f.push(`<button class="primary" id="fGo">筛选</button>`);
   if(hasFilter(p)||p.forgotten) f.push(`<button id="fClear">清空</button>`);
@@ -1748,6 +1759,97 @@ function openRelationEdit(r){
       toast('已保存'); closeDrawer(); render();
     }catch(e){ toast('保存失败：'+e.message, true); }
   };
+}
+
+// ---------- 渠道
+//
+// 渠道原本是编译期枚举（mc/qq/live/system），加一个平台要改代码。
+// 现在是可维护的数据：这里能新增、改名、调可信度、删除。
+const BUILTIN_CHANNELS = ['mc','qq','live','system'];
+
+async function renderChannels(c){
+  const items = await api('/api/admin/channels');
+  c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
+    渠道决定一条记忆「从哪来」，也决定它在检索时的可信度（弹幕可能有玩笑和反串，所以低于 MC）。
+    接入新平台时先在这里加一个 tag，之后就能直接用它写记忆。
+  </p>
+  <div class="tablewrap">
+    <div class="tbl-head"><span class="t">渠道</span>
+      <span class="dim">共 ${items.length} 个</span><span class="sp"></span>
+      <button class="primary" id="chNew">+ 新增渠道</button></div>
+    <div style="overflow-x:auto"><table><thead><tr>
+      <th>tag</th><th>显示名</th><th style="width:150px">可信度</th>
+      <th class="num">事件数</th><th>类型</th><th style="width:120px"></th></tr></thead>
+    <tbody>${items.map(ch=>`<tr>
+      <td class="mono"><b>${esc(ch.tag)}</b></td>
+      <td>${esc(ch.label)}</td>
+      <td>${impBar(ch.trust)}</td>
+      <td class="num">${fmtNum(ch.events)}</td>
+      <td>${ch.builtin?'<span class="badge b-extracted">内置</span>':'<span class="badge b-curated">自定义</span>'}</td>
+      <td>
+        <button class="chip" data-ch-edit="${esc(ch.tag)}">编辑</button>
+        ${ch.builtin?'':`<button class="chip" data-ch-del="${esc(ch.tag)}">删除</button>`}
+      </td></tr>`).join('')}</tbody></table></div>
+  </div>`;
+
+  $('chNew').onclick=()=>{
+    showDrawer('新增渠道', `
+      <div class="editrow"><label>tag <span class="dim">小写字母/数字/下划线/连字符，写进接口用</span></label>
+        <input id="chTag" placeholder="例如 bilibili"></div>
+      <div class="editrow"><label>显示名</label>
+        <input id="chLabel" placeholder="例如 B站直播"></div>
+      <div class="editrow"><label>可信度 <span class="dim">0–1，弹幕类平台建议 0.8</span></label>
+        <input type="number" id="chTrust" min="0" max="1" step="0.05" value="0.8"></div>`,
+      `<button class="primary" id="chSave">创建</button><span class="sp"></span>`);
+    $('chSave').onclick=async()=>{
+      const tag=$('chTag').value.trim();
+      if(!tag){ toast('tag 不能为空', true); return; }
+      try{
+        await apiDo('POST','/api/admin/channels',{
+          tag, label:$('chLabel').value.trim()||undefined,
+          trust:+($('chTrust').value||0.8)
+        });
+        toast('已创建'); closeDrawer(); render();
+      }catch(e){ toast('创建失败：'+e.message, true); }
+    };
+  };
+
+  c.querySelectorAll('[data-ch-edit]').forEach(el=>{
+    el.onclick=()=>{
+      const tag=el.dataset.chEdit;
+      const ch=items.find(x=>x.tag===tag);
+      showDrawer('渠道 · '+tag, `
+        <div class="editrow"><label>tag <span class="dim">不可改（改 tag 等于换一个渠道）</span></label>
+          <input value="${esc(tag)}" disabled class="dim"></div>
+        <div class="editrow"><label>显示名</label>
+          <input id="chLabel2" value="${esc(ch.label)}"></div>
+        <div class="editrow"><label>可信度 <span class="dim">0–1</span></label>
+          <input type="number" id="chTrust2" min="0" max="1" step="0.05" value="${ch.trust}"></div>
+        <div class="sectitle">只读</div>
+        <div class="kv"><div class="k">事件数</div><div class="v mono">${ch.events}</div>
+        <div class="k">类型</div><div class="v">${ch.builtin?'内置（不可删）':'自定义'}</div></div>`,
+        `<button class="primary" id="chPatch">保存</button><span class="sp"></span>`);
+      $('chPatch').onclick=async()=>{
+        try{
+          await apiDo('PATCH', '/api/admin/channels/'+encodeURIComponent(tag), {
+            label:$('chLabel2').value.trim(), trust:+($('chTrust2').value||0.8)
+          });
+          toast('已保存'); closeDrawer(); render();
+        }catch(e){ toast('保存失败：'+e.message, true); }
+      };
+    };
+  });
+
+  c.querySelectorAll('[data-ch-del]').forEach(el=>{
+    el.onclick=async()=>{
+      const tag=el.dataset.chDel;
+      if(!confirm(`删除渠道 ${tag}？\n\n还有事件在用它时会拒绝删除。`)) return;
+      try{
+        await apiDo('DELETE', '/api/admin/channels/'+encodeURIComponent(tag));
+        toast('已删除'); render();
+      }catch(e){ toast('删除失败：'+e.message, true); }
+    };
+  });
 }
 
 // ---------- 特质
@@ -2548,6 +2650,8 @@ async function boot(){
     const s = await api('/api/admin/session');
     $('whoami').textContent = s.user || '（未启用登录）';
   }catch(e){ /* api() 已处理 401 跳转 */ }
+
+  await loadChannels();
 
   const p = new URLSearchParams(location.search).get('p');
   go(PAGES[p] ? p : 'overview');

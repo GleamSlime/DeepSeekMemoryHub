@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 17;
+pub const SCHEMA_VERSION: i32 = 18;
 
 /// 数据库句柄。
 ///
@@ -361,6 +361,7 @@ pub const TABLES: &[&str] = &[
     "channel",
     "persona",
     "voice",
+    "image",
     "person",
     "person_account",
     "person_scene",
@@ -473,6 +474,38 @@ CREATE TABLE IF NOT EXISTS voice (
 );
 CREATE INDEX IF NOT EXISTS voice_recent ON voice(created_ms DESC);
 CREATE INDEX IF NOT EXISTS voice_rating ON voice(rating DESC) WHERE rating IS NOT NULL;
+
+-- 记忆画面：图片也是记忆，靠关键词触发、按关系关联人。
+--
+-- 为什么单独一张表而不是塞进 event：图片要能被**检索命中**（关键词）、
+-- 要有自己的元数据（谁发的、关联谁、被想起几次），还要能人工编辑。
+-- 塞进 event 的话这些字段都得塞进 summary 字符串里，那就没法查了。
+CREATE TABLE IF NOT EXISTS image (
+  id          TEXT PRIMARY KEY,
+  -- `data_dir/images/` 下的文件名
+  file        TEXT NOT NULL,
+  -- 缩略图（列表页用，避免一次拉几十张原图）
+  thumb       TEXT,
+  width       INTEGER,
+  height      INTEGER,
+  bytes       INTEGER NOT NULL,
+  -- 图片内容的一句话描述（接入方给的，或人工补的）—— 检索主要靠它
+  caption     TEXT,
+  -- 额外的关键词，逗号分隔；命中任一个就算触发
+  keywords    TEXT,
+  -- 谁发来的：渠道账号或人名
+  sender      TEXT,
+  channel     TEXT,
+  -- 关联的人（逗号分隔的 person_id）
+  person_ids  TEXT,
+  -- 被想起过多少次（进了上下文就 +1）
+  recall_count INTEGER NOT NULL DEFAULT 0,
+  last_recall_ms INTEGER,
+  created_ms  INTEGER NOT NULL,
+  updated_ms  INTEGER NOT NULL,
+  deleted_by  INTEGER
+);
+CREATE INDEX IF NOT EXISTS image_recent ON image(created_ms DESC);
 
 CREATE TABLE IF NOT EXISTS person_account (
   channel       TEXT NOT NULL,         -- mc / qq / live / system

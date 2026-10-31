@@ -42,6 +42,8 @@ pub const SEG_MOOD: &str = "mood";
 /// 称呼对照。**只在当前这句话里提到某个人时**才出现——
 /// 把全部身份一股脑塞进上下文，既费 token 又会让模型把不相干的人扯进来。
 pub const SEG_NAMES: &str = "names";
+/// 记忆画面。只在这段话提到某张图的描述/关键词时出现。
+pub const SEG_IMAGES: &str = "images";
 
 /// 段落之间的分隔。空一行，让 markdown 读起来是分节的。
 const SEP: &str = "\n\n";
@@ -442,6 +444,33 @@ pub fn render_kb(rows: &[(Option<String>, String)]) -> Option<String> {
 ///
 /// 这里**不再排序**：顺序由检索层给（命中优先、权重次之），
 /// 重排会让「为什么这条排在前面」这件事变得没法解释。
+/// 「记忆画面」段：只在被提到时列出图片。
+///
+/// 输入 `(描述, 关键词)`。**不给 URL** —— 模型看不到图，
+/// 给了链接它只会瞎编「我看到了」。给的是「你记得有这么一张图，内容是什么」。
+pub fn render_images(rows: &[(Option<String>, Option<String>)]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for (caption, keywords) in rows {
+        let cap = caption.as_deref().unwrap_or("").trim();
+        let kw = keywords.as_deref().unwrap_or("").trim();
+        if cap.is_empty() && kw.is_empty() {
+            continue;
+        }
+        match (cap.is_empty(), kw.is_empty()) {
+            (false, true) => lines.push(format!("- {cap}")),
+            (true, false) => lines.push(format!("- （一张图，关键词：{kw}）")),
+            _ => lines.push(format!("- {cap}（关键词：{kw}）")),
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "# 你记得的画面\n这些图你见过、记得内容，但现在看不到它们：\n{}",
+        lines.join("\n")
+    ))
+}
+
 /// 「称呼对照」段：只列出**这句话里提到的人**的各种叫法。
 ///
 /// 输入 `(显示名, [(场景名, 该场景称呼)])`，场景名用「QQ 群叫」「MC 里叫」这种口语。

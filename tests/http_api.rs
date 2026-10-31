@@ -3803,3 +3803,263 @@ async fn 语音文件名不能越界读文件() {
     let r = s.get("/v1/voice/v2/file").await;
     assert_eq!(r.status(), 404, "越界路径必须拿不到文件");
 }
+
+// ================================================================== 记忆画面
+
+/// 1x1 PNG 的真实字节（最小合法 PNG）。
+fn tiny_png() -> Vec<u8> {
+    let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    // 用我们自己的解码器解（它已经在 lib 里被测试过）
+    let mut out = Vec::new();
+    let mut buf: u32 = 0;
+    let mut bits = 0;
+    for c in b64.bytes().filter(|b| *b != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => continue,
+        } as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    out
+}
+
+async fn upload_png(s: &TestServer, caption: &str, keywords: &str) -> serde_json::Value {
+    let png = tiny_png();
+    let boundary = "----img-boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+    body.extend_from_slice(&png);
+    for (k, v) in [("caption", caption), ("keywords", keywords)] {
+        body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{k}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(v.as_bytes());
+    }
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let r = TestServer::client()
+        .post(format!("{}/v1/image", s.base))
+        .header("x-api-token", TOKEN)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let st = r.status();
+    let txt = r.text().await.unwrap();
+    assert_eq!(st, 200, "上传图片应成功：{txt}");
+    serde_json::from_str(&txt).unwrap()
+}
+
+#[tokio::test]
+async fn 图片能上传列表下载并改元数据() {
+    let s = TestServer::start().await;
+    let j = upload_png(&s, "在湖边钓上来的一条大鱼", "钓鱼,湖,大鱼").await;
+    let id = j["id"].as_str().unwrap().to_string();
+    assert!(j["file"].as_str().unwrap().ends_with(".png"));
+
+    // 列表
+    let list: serde_json::Value = s.get("/v1/image").await.json().await.unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["caption"], "在湖边钓上来的一条大鱼");
+
+    // 原图能下载，且是真的 PNG
+    let r = s.get(&format!("/v1/image/{id}/file")).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers().get("content-type").unwrap(), "image/png");
+    let bytes = r.bytes().await.unwrap();
+    assert_eq!(&bytes[0..4], &[0x89, b'P', b'N', b'G']);
+
+    // 改元数据
+    let r = TestServer::client()
+        .patch(format!("{}/v1/image/{id}", s.base))
+        .header("x-api-token", TOKEN)
+        .json(&serde_json::json!({"keywords":"钓鱼,湖,大鱼,自检","sender":"姆姆"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = s
+        .get(&format!("/v1/image/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["sender"], "姆姆");
+}
+
+#[tokio::test]
+async fn 提到关键词时画面会进上下文() {
+    let s = TestServer::start().await;
+    upload_png(&s, "在湖边钓上来的一条大鱼", "钓鱼,湖,大鱼").await;
+
+    // 提到「钓鱼」→ 出现 images 段
+    let j: serde_json::Value = s
+        .get("/v1/context?q=你昨天钓鱼怎么样")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(
+        text.contains("你记得的画面"),
+        "提到关键词应想起画面：{text}"
+    );
+    assert!(text.contains("大鱼"), "要带上描述：{text}");
+    assert!(
+        j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
+        "parts 里要有 images：{j}"
+    );
+
+    // 没提到 → 不出现
+    let j: serde_json::Value = s
+        .get("/v1/context?q=今天天气不错")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
+        "没提到不该出现：{j}"
+    );
+}
+
+#[tokio::test]
+async fn 图片被想起时会累计次数() {
+    let s = TestServer::start().await;
+    let j = upload_png(&s, "钓鱼的收获", "钓鱼").await;
+    let id = j["id"].as_str().unwrap().to_string();
+
+    let before: serde_json::Value = s
+        .get(&format!("/v1/image/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(before["recall_count"], 0);
+
+    s.get("/v1/context?q=钓鱼").await;
+    let after: serde_json::Value = s
+        .get(&format!("/v1/image/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after["recall_count"], 1, "进上下文就 +1");
+    assert!(after["last_recall_ms"].as_i64().is_some());
+}
+
+#[tokio::test]
+async fn 图片可以逻辑删除且认不出非图片() {
+    let s = TestServer::start().await;
+    let j = upload_png(&s, "要删掉的", "x").await;
+    let id = j["id"].as_str().unwrap().to_string();
+
+    let r = TestServer::client()
+        .delete(format!("{}/v1/image/{id}", s.base))
+        .header("x-api-token", TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let list: serde_json::Value = s.get("/v1/image").await.json().await.unwrap();
+    assert!(list.as_array().unwrap().is_empty());
+
+    // 传一段不是图片的字节 → 400（按魔数判，不看文件名）
+    let boundary = "----bad";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\n",
+    );
+    body.extend_from_slice(b"this is not an image at all");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let r = TestServer::client()
+        .post(format!("{}/v1/image", s.base))
+        .header("x-api-token", TOKEN)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "文件名写着 png 但内容不是，就该拒掉");
+}
+
+#[tokio::test]
+async fn 图片支持_base64_上传() {
+    let s = TestServer::start().await;
+    let png = tiny_png();
+    let b64 = {
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut o = String::new();
+        for chunk in png.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            o.push(T[(n >> 18) as usize & 63] as char);
+            o.push(T[(n >> 12) as usize & 63] as char);
+            o.push(if chunk.len() > 1 {
+                T[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            o.push(if chunk.len() > 2 {
+                T[n as usize & 63] as char
+            } else {
+                '='
+            });
+        }
+        o
+    };
+    let boundary = "----b64";
+    let mut body = Vec::new();
+    for (k, v) in [("base64", b64.as_str()), ("caption", "base64 上传的")] {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{k}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(v.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let r = TestServer::client()
+        .post(format!("{}/v1/image", s.base))
+        .header("x-api-token", TOKEN)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let st = r.status();
+    let txt = r.text().await.unwrap();
+    assert_eq!(st, 200, "base64 上传应成功：{txt}");
+    let list: serde_json::Value = s.get("/v1/image").await.json().await.unwrap();
+    assert_eq!(list[0]["caption"], "base64 上传的");
+}

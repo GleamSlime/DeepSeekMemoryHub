@@ -414,6 +414,11 @@ impl Config {
         self.data_dir.join("voices")
     }
 
+    /// 记忆画面的图片目录（原图 + 缩略图）。
+    pub fn image_dir(&self) -> PathBuf {
+        self.data_dir.join("images")
+    }
+
     /// 把数据目录标准化（不要求存在）。
     pub fn normalize_paths(&mut self) {
         self.data_dir = normalize(&self.data_dir);

@@ -315,6 +315,13 @@ pub fn router(state: AppState) -> Router {
             get(download_voice).patch(patch_voice).delete(delete_voice),
         )
         .route("/v1/voice/{id}/file", get(stream_voice))
+        .route("/v1/image", post(upload_image).get(list_image))
+        .route(
+            "/v1/image/{id}",
+            get(get_image).patch(patch_image).delete(delete_image),
+        )
+        .route("/v1/image/{id}/file", get(stream_image))
+        .route("/v1/image/{id}/thumb", get(stream_image_thumb))
         .route("/v1/snapshot", post(take_snapshot))
         .route("/v1/snapshot/list", get(list_snapshots))
         .route("/v1/rollback", post(do_rollback))
@@ -2003,6 +2010,36 @@ async fn get_context(
             Err(e) => notes.push(format!("memory: 读取失败（{e}）")),
         }
 
+        // -------- 2.3 记忆画面（只在这段话提到某张图时出现）
+        //
+        // 与称呼对照同一套思路：只在被提到时才想起来。
+        // 把最近几十张图全塞进来既费 token，也会让它开始胡说「我看到你发的图」。
+        match crate::image::mentioned(&db, &needle, 3) {
+            Ok(rows) => {
+                // 进了上下文就算「被想起了一次」：面板上按回忆次数排序才有意义。
+                for img in &rows {
+                    let _ = db.with_write(|tx| {
+                        tx.execute(
+                            "UPDATE image SET recall_count = recall_count + 1,
+                                              last_recall_ms = ?1
+                             WHERE id = ?2",
+                            rusqlite::params![now, img.id],
+                        )?;
+                        Ok(())
+                    });
+                }
+                let pairs: Vec<(Option<String>, Option<String>)> = rows
+                    .iter()
+                    .map(|i| (i.caption.clone(), i.keywords.clone()))
+                    .collect();
+                push(
+                    crate::context::render_images(&pairs),
+                    crate::context::SEG_IMAGES,
+                );
+            }
+            Err(e) => notes.push(format!("images: 读取失败（{e}）")),
+        }
+
         // -------- 2.4 称呼对照（只在本轮这句话提到某个人时出现）
         //
         // 为什么不把所有身份都列出来：上下文每轮都发，整张 person 表既费 token，
@@ -2652,6 +2689,331 @@ async fn person_ignored_check(
     .await
     .map_err(|e| Error::Storage(format!("忽视查询失败：{e}")))??;
     Ok(Json(out))
+}
+
+// ------------------------------------------------------------------ 记忆画面
+
+/// 上传一张图片（multipart）。
+///
+/// 字段：`file`（必填）+ 可选 `caption` / `keywords` / `sender` / `channel` /
+/// `person_ids`（逗号分隔）。
+///
+/// 也支持 `base64` 字段（不带 file 时），方便那些只会发 JSON 的接入方。
+async fn upload_image(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mut mp: axum::extract::Multipart,
+) -> ApiResult<serde_json::Value> {
+    check_token(&st, &headers)?;
+
+    let mut data: Option<Vec<u8>> = None;
+    let mut caption = None;
+    let mut keywords = None;
+    let mut sender = None;
+    let mut channel: Option<String> = None;
+    let mut person_ids = None;
+
+    while let Some(field) = mp
+        .next_field()
+        .await
+        .map_err(|e| Error::BadRequest(format!("读取上传内容失败：{e}")))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            data = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::BadRequest(format!("读取图片失败：{e}")))?
+                    .to_vec(),
+            );
+            continue;
+        }
+        let val = field
+            .text()
+            .await
+            .map_err(|e| Error::BadRequest(format!("读取字段 {name} 失败：{e}")))?;
+        let v = val.trim().to_string();
+        if v.is_empty() {
+            continue;
+        }
+        match name.as_str() {
+            "caption" => caption = Some(v),
+            "keywords" => keywords = Some(v),
+            "sender" => sender = Some(v),
+            "channel" => channel = Some(check_channel(&st, &v)?),
+            "person_ids" => person_ids = Some(v),
+            // base64 只作 file 的备选：两者都传时以 file 为准
+            "base64" if data.is_none() => {
+                let raw = v
+                    .strip_prefix("data:")
+                    .and_then(|s| s.split_once(',').map(|x| x.1))
+                    .unwrap_or(&v);
+                data = Some(base64_decode(raw)?);
+            }
+            _ => {}
+        }
+    }
+
+    let data = data.ok_or_else(|| Error::BadRequest("缺少 file 或 base64".into()))?;
+    if data.is_empty() {
+        return Err(Error::BadRequest("图片是空的".into()));
+    }
+
+    let id = format!("img-{}-{}", now_ms(), rand_suffix());
+    let dir = st.cfg.image_dir();
+    let id2 = id.clone();
+    let stored = tokio::task::spawn_blocking(move || crate::image::store_image(&dir, &id2, &data))
+        .await
+        .map_err(|e| Error::Storage(format!("保存图片失败：{e}")))??;
+    let (file, thumb, w, h, bytes) = (
+        stored.file,
+        stored.thumb,
+        stored.width,
+        stored.height,
+        stored.bytes,
+    );
+
+    let db = st.db.clone();
+    let id3 = id.clone();
+    let file_db = file.clone();
+    let thumb_db = thumb.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let now = now_ms();
+            tx.execute(
+                "INSERT INTO image(id, file, thumb, width, height, bytes, caption,
+                                   keywords, sender, channel, person_ids,
+                                   created_ms, updated_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
+                rusqlite::params![
+                    id3, file_db, thumb_db, w, h, bytes, caption, keywords, sender, channel,
+                    person_ids, now
+                ],
+            )?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("写入图片记录失败：{e}")))??;
+
+    Ok(Json(serde_json::json!({
+        "ok": true, "id": id, "file": file, "thumb": thumb,
+        "width": w, "height": h, "bytes": bytes,
+    })))
+}
+
+/// 极简 base64 解码（标准表 + 允许末尾 `=`）。
+///
+/// 为什么手写：为了一个可选字段引一个 crate 不划算，
+/// 而 base64 的规则足够简单，写错了测试会立刻抓到。
+fn base64_decode(s: &str) -> Result<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let clean: Vec<u8> = s
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+        .collect();
+    if clean.is_empty() {
+        return Err(Error::BadRequest("base64 是空的".into()));
+    }
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0u32;
+    for b in clean {
+        let v = val(b).ok_or_else(|| Error::BadRequest("base64 里有非法字符".into()))? as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct ImageListQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_image(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ImageListQuery>,
+) -> ApiResult<Vec<crate::image::ImageItem>> {
+    check_token(&st, &headers)?;
+    let db = st.db.clone();
+    let query = q.q.clone();
+    let limit = q.limit.unwrap_or(100);
+    let items =
+        tokio::task::spawn_blocking(move || crate::image::list(&db, query.as_deref(), limit))
+            .await
+            .map_err(|e| Error::Storage(format!("图片列表失败：{e}")))??;
+    Ok(Json(items))
+}
+
+async fn get_image(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<crate::image::ImageItem> {
+    check_token(&st, &headers)?;
+    let db = st.db.clone();
+    let id2 = id.clone();
+    let item = tokio::task::spawn_blocking(move || crate::image::get(&db, &id2))
+        .await
+        .map_err(|e| Error::Storage(format!("图片查询失败：{e}")))??;
+    item.map(Json)
+        .ok_or_else(|| Error::NotFound(format!("图片 {id}")))
+}
+
+#[derive(Deserialize)]
+struct ImagePatch {
+    caption: Option<String>,
+    keywords: Option<String>,
+    sender: Option<String>,
+    person_ids: Option<String>,
+    channel: Option<String>,
+}
+
+async fn patch_image(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(p): Json<ImagePatch>,
+) -> ApiResult<serde_json::Value> {
+    // 面板里编辑图片元数据 —— 允许会话。
+    check_token_or_session(&st, &headers)?;
+    let channel = match p.channel.as_deref() {
+        Some(c) => Some(check_channel(&st, c)?),
+        None => None,
+    };
+    let db = st.db.clone();
+    let id2 = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let n = tx.execute(
+                "UPDATE image SET
+                   caption = COALESCE(?1, caption),
+                   keywords = COALESCE(?2, keywords),
+                   sender = COALESCE(?3, sender),
+                   person_ids = COALESCE(?4, person_ids),
+                   channel = COALESCE(?5, channel),
+                   updated_ms = ?6
+                 WHERE id = ?7 AND deleted_by IS NULL",
+                rusqlite::params![
+                    p.caption,
+                    p.keywords,
+                    p.sender,
+                    p.person_ids,
+                    channel,
+                    now_ms(),
+                    id2
+                ],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("图片 {id2}")));
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("更新图片失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn delete_image(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    check_token_or_session(&st, &headers)?;
+    let db = st.db.clone();
+    let id2 = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let n = tx.execute(
+                "UPDATE image SET deleted_by = 1, updated_ms = ?1
+                 WHERE id = ?2 AND deleted_by IS NULL",
+                rusqlite::params![now_ms(), id2],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("图片 {id2}")));
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("删除图片失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn image_response(
+    st: &AppState,
+    id: &str,
+    want_thumb: bool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
+    let db = st.db.clone();
+    let dir = st.cfg.image_dir();
+    let id = id.to_string();
+    Box::pin(async move {
+        let item = match tokio::task::spawn_blocking(move || crate::image::get(&db, &id)).await {
+            Ok(Ok(Some(v))) => v,
+            Ok(Ok(None)) => return (StatusCode::NOT_FOUND, "没有这张图").into_response(),
+            _ => return (StatusCode::INTERNAL_SERVER_ERROR, "查询失败").into_response(),
+        };
+        let name = if want_thumb {
+            item.thumb.clone().unwrap_or_else(|| item.file.clone())
+        } else {
+            item.file.clone()
+        };
+        let Some(path) = crate::image::resolve_file(&dir, &name) else {
+            return (StatusCode::NOT_FOUND, "文件不在了").into_response();
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return (StatusCode::NOT_FOUND, "读不到文件").into_response();
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, crate::image::mime(ext))],
+            bytes,
+        )
+            .into_response()
+    })
+}
+
+async fn stream_image(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if check_token(&st, &headers).is_err() {
+        return (StatusCode::UNAUTHORIZED, "需要 token").into_response();
+    }
+    image_response(&st, &id, false).await
+}
+
+async fn stream_image_thumb(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if check_token(&st, &headers).is_err() {
+        return (StatusCode::UNAUTHORIZED, "需要 token").into_response();
+    }
+    image_response(&st, &id, true).await
 }
 
 // ------------------------------------------------------------------ 语音库

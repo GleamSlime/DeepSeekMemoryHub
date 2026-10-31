@@ -472,6 +472,7 @@ const PAGES = {
   kb:        {title:'知识库',   icon:'📚', url:'/api/admin/kb'},
   channels:  {title:'渠道',     icon:'🔌', url:'/api/admin/channels'},
   personas:  {title:'人格',     icon:'🎭', url:'/api/admin/personas'},
+  images:    {title:'记忆画面', icon:'🖼', url:null},
   voices:    {title:'语音库',   icon:'🎙', url:null},
   settings:  {title:'配置',     icon:'🎛', url:'/api/admin/settings'},
   persons:   {title:'身份',     icon:'👥', url:'/api/admin/persons'},
@@ -485,7 +486,7 @@ const NAV_GROUPS = [
   {label:'知识库', items:['kb']},
   {label:'规划', items:['plans']},
   {label:'人格', items:['personas','mood','self','relations','traits','promises']},
-  {label:'素材', items:['voices','scenes']},
+  {label:'素材', items:['images','voices','scenes']},
   {label:'渠道', items:['channels','messages']},
   {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
 ];
@@ -552,6 +553,7 @@ async function render(){
     if(state.page==='personas') return await renderPersonas(c);
     if(state.page==='voices') return await renderVoices(c);
     if(state.page==='scenes') return await renderScenes(c);
+    if(state.page==='images') return await renderImages(c);
     // 「配置」也有专用渲染函数。少了这一行它会掉进 renderTable 兜底，
     // 而 renderTable 不认 'settings' —— 于是整页只剩一个空的筛选栏，
     // 用户看到的就是「配置菜单里什么也没有」。
@@ -1786,6 +1788,109 @@ function openRelationEdit(r){
       toast('已保存'); closeDrawer(); render();
     }catch(e){ toast('保存失败：'+e.message, true); }
   };
+}
+
+// ---------- 记忆画面
+//
+// 图片也是记忆：提到关键词时会被想起来（进上下文），也能人工编辑/删除。
+async function renderImages(c){
+  const q = state.params.q || '';
+  const items = await api('/v1/image'+(q?'?q='+encodeURIComponent(q):''));
+  c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
+    图片也是记忆：<b>描述/关键词被提到时</b>会进上下文（像事件一样），
+    也能在这里手动增删改、改关联人和回忆次数。
+  </p>
+  <div style="display:flex;gap:9px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+    <input type="search" id="imgQ" placeholder="搜描述/关键词/发送者…" value="${esc(q)}" style="max-width:280px">
+    <button class="primary" id="imgGo">搜索</button>
+    <span class="sp" style="flex:1"></span>
+    <button class="primary" id="imgNew">+ 上传图片</button>
+  </div>
+  ${items.length?`<div class="cards">${items.map(v=>`
+    <div class="card" style="cursor:pointer" data-img='${esc(JSON.stringify(v))}'>
+      <div style="width:100%;height:120px;background:#0d1219;border-radius:7px;overflow:hidden;
+                  display:flex;align-items:center;justify-content:center;margin-bottom:9px">
+        <img src="/v1/image/${encodeURIComponent(v.id)}/thumb" alt=""
+             style="max-width:100%;max-height:100%;object-fit:contain">
+      </div>
+      <div class="k">${esc((v.caption||'（无描述）').slice(0,26))}</div>
+      <div class="m">${v.width&&v.height?`${v.width}×${v.height} · `:''}${fmtBytes(v.bytes)}</div>
+      <div class="m">想起 ${v.recall_count} 次 · ${fmtAgo(v.created_ms)}</div>
+    </div>`).join('')}</div>`
+  :'<div class="empty">还没有图片。点「上传图片」或接入方 <code>POST /v1/image</code>。</div>'}`;
+
+  $('imgGo').onclick=()=>{ state.params.q=$('imgQ').value.trim(); render(); };
+  $('imgQ').onkeydown=e=>{ if(e.key==='Enter'){ state.params.q=$('imgQ').value.trim(); render(); } };
+
+  const openEditor = (v)=>{
+    const isNew = !v;
+    showDrawer(isNew?'上传图片':'画面 · '+fmtTime(v.created_ms), `
+      ${isNew?`<div class="editrow"><label>选择图片</label>
+        <input type="file" id="imgFile" accept="image/*"></div>`
+      :`<div style="text-align:center;margin-bottom:14px">
+          <img src="/v1/image/${encodeURIComponent(v.id)}/file" alt=""
+               style="max-width:100%;max-height:320px;border-radius:8px">
+          <div class="dim" style="font-size:11.5px;margin-top:6px">
+            <a href="/v1/image/${encodeURIComponent(v.id)}/file" download>下载原图</a>
+            · 想起 ${v.recall_count} 次</div>
+        </div>`}
+      <div class="editrow"><label>描述 <span class="dim">检索主要靠它</span></label>
+        <input id="imgCap" value="${esc(v&&v.caption?v.caption:'')}" placeholder="例如：在湖边钓上来的一条大鱼"></div>
+      <div class="editrow"><label>关键词 <span class="dim">逗号分隔；命中任一个就会想起来</span></label>
+        <input id="imgKw" value="${esc(v&&v.keywords?v.keywords:'')}" placeholder="钓鱼,湖,大鱼"></div>
+      <div class="editrow"><label>发送者</label>
+        <input id="imgSender" value="${esc(v&&v.sender?v.sender:'')}" placeholder="谁发的"></div>
+      <div class="editrow"><label>渠道</label>
+        <input id="imgChannel" value="${esc(v&&v.channel?v.channel:'')}" placeholder="mc / qq / …（留空不记）"></div>
+      <div class="editrow"><label>关联的人 <span class="dim">逗号分隔的 person_id</span></label>
+        <input id="imgPersons" value="${esc(v&&v.person_ids?v.person_ids:'')}" placeholder="p-gleam"></div>`,
+      `<button class="primary" id="imgSave">${isNew?'上传':'保存'}</button>
+       ${isNew?'':`<button class="danger" id="imgDel">删除</button>`}
+       <span class="sp"></span>`);
+
+    if(isNew){
+      $('imgSave').onclick=async()=>{
+        const f=$('imgFile').files && $('imgFile').files[0];
+        if(!f){ toast('先选一张图', true); return; }
+        const fd=new FormData();
+        fd.append('file', f);
+        const cap=$('imgCap').value.trim(); if(cap) fd.append('caption', cap);
+        const kw=$('imgKw').value.trim(); if(kw) fd.append('keywords', kw);
+        const sd=$('imgSender').value.trim(); if(sd) fd.append('sender', sd);
+        const ch=$('imgChannel').value.trim(); if(ch) fd.append('channel', ch);
+        const ps=$('imgPersons').value.trim(); if(ps) fd.append('person_ids', ps);
+        try{
+          const r=await fetch('/v1/image',{method:'POST',body:fd});
+          if(!r.ok){ let m=r.status+''; try{const j=await r.json(); if(j.error)m=j.error;}catch(_){} toast('上传失败：'+m,true); return; }
+          toast('已上传'); closeDrawer(); render();
+        }catch(e){ toast('上传失败：'+e.message, true); }
+      };
+    }else{
+      $('imgSave').onclick=async()=>{
+        try{
+          await apiDo('PATCH','/v1/image/'+encodeURIComponent(v.id),{
+            caption:$('imgCap').value.trim(),
+            keywords:$('imgKw').value.trim(),
+            sender:$('imgSender').value.trim(),
+            person_ids:$('imgPersons').value.trim(),
+            channel:$('imgChannel').value.trim()||undefined
+          });
+          toast('已保存'); closeDrawer(); render();
+        }catch(e){ toast('保存失败：'+e.message, true); }
+      };
+      $('imgDel').onclick=async()=>{
+        if(!confirm('删除这张画面？')) return;
+        try{ await apiDo('DELETE','/v1/image/'+encodeURIComponent(v.id));
+          toast('已删除'); closeDrawer(); render(); }
+        catch(e){ toast('删除失败：'+e.message, true); }
+      };
+    }
+  };
+
+  $('imgNew').onclick=()=>openEditor(null);
+  c.querySelectorAll('[data-img]').forEach(el=>{
+    el.onclick=()=>openEditor(JSON.parse(el.dataset.img));
+  });
 }
 
 // ---------- 语音库

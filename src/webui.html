@@ -472,6 +472,7 @@ const PAGES = {
   kb:        {title:'知识库',   icon:'📚', url:'/api/admin/kb'},
   channels:  {title:'渠道',     icon:'🔌', url:'/api/admin/channels'},
   personas:  {title:'人格',     icon:'🎭', url:'/api/admin/personas'},
+  voices:    {title:'语音库',   icon:'🎙', url:null},
   settings:  {title:'配置',     icon:'🎛', url:'/api/admin/settings'},
   persons:   {title:'身份',     icon:'👥', url:'/api/admin/persons'},
   snapshots: {title:'快照',     icon:'💾', url:'/api/admin/snapshots'},
@@ -484,6 +485,7 @@ const NAV_GROUPS = [
   {label:'知识库', items:['kb']},
   {label:'规划', items:['plans']},
   {label:'人格', items:['personas','mood','self','relations','traits','promises']},
+  {label:'素材', items:['voices','scenes']},
   {label:'渠道', items:['channels','messages']},
   {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
 ];
@@ -548,6 +550,8 @@ async function render(){
     if(state.page==='kb') return await renderKb(c);
     if(state.page==='channels') return await renderChannels(c);
     if(state.page==='personas') return await renderPersonas(c);
+    if(state.page==='voices') return await renderVoices(c);
+    if(state.page==='scenes') return await renderScenes(c);
     // 「配置」也有专用渲染函数。少了这一行它会掉进 renderTable 兜底，
     // 而 renderTable 不认 'settings' —— 于是整页只剩一个空的筛选栏，
     // 用户看到的就是「配置菜单里什么也没有」。
@@ -1782,6 +1786,96 @@ function openRelationEdit(r){
       toast('已保存'); closeDrawer(); render();
     }catch(e){ toast('保存失败：'+e.message, true); }
   };
+}
+
+// ---------- 语音库
+//
+// 发出去的语音存下来，人工打分后用来训练更好的音源。
+// 打分是人的判断：几秒的短句上机器打分的噪声比人还大。
+async function renderVoices(c){
+  const rated = state.params.rated==='1';
+  const items = await api('/v1/voice'+(rated?'?rated=1':''));
+  c.innerHTML = `<p class="dim" style="font-size:12.5px;margin:0 0 14px">
+    发出去的语音会存在这里（<b>m4a</b>，转不了就保留原格式）。听完打分和写备注，
+    之后按分数筛出「念得好」的那批去做训练素材。
+  </p>
+  <div style="display:flex;gap:9px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+    <span class="seg" data-seg="vFilter">
+      <button data-v="" class="${!rated?'on':''}">全部</button>
+      <button data-v="1" class="${rated?'on':''}">只看打过分的</button>
+    </span>
+    <span class="dim">共 ${items.length} 条</span>
+  </div>
+  ${items.length?`<div class="tablewrap"><div style="overflow-x:auto"><table><thead><tr>
+    <th>试听</th><th>文本</th><th>评分</th><th>备注</th><th class="num">时长</th>
+    <th class="num">大小</th><th>时间</th><th style="width:100px"></th></tr></thead>
+  <tbody>${items.map(v=>`<tr>
+    <td><audio controls preload="none" style="height:32px;width:170px"
+         src="/v1/voice/${encodeURIComponent(v.id)}/file"></audio></td>
+    <td style="max-width:280px">${esc((v.text||'（无文本）').slice(0,60))}</td>
+    <td>${v.rating?`<span class="badge b-ok">${'★'.repeat(v.rating)}</span>`:'<span class="dim">未评</span>'}</td>
+    <td class="dim" style="max-width:200px">${esc(v.note||'—')}</td>
+    <td class="num mono">${v.duration_ms?(v.duration_ms/1000).toFixed(1)+'s':'—'}</td>
+    <td class="num mono dim">${fmtBytes(v.bytes)}</td>
+    <td class="mono dim nowrap">${fmtAgo(v.created_ms)}</td>
+    <td>
+      <button class="chip" data-v-edit="${esc(v.id)}">评/备注</button>
+    </td></tr>`).join('')}</tbody></table></div></div>`
+  :'<div class="empty">还没有语音。接入方 <code>POST /v1/voice</code>（multipart）上传后会出现在这里。</div>'}`;
+
+  document.querySelectorAll('[data-seg="vFilter"] button').forEach(b=>{
+    b.onclick=()=>{ state.params.rated = b.dataset.v; render(); };
+  });
+
+  c.querySelectorAll('[data-v-edit]').forEach(el=>{
+    el.onclick=()=>{
+      const v = items.find(x=>x.id===el.dataset.vEdit);
+      showDrawer('语音 · '+fmtTime(v.created_ms), `
+        <audio controls style="width:100%;margin-bottom:14px"
+               src="/v1/voice/${encodeURIComponent(v.id)}/file"></audio>
+        <div class="sectitle">打分 <span class="hint">1 差 — 5 好；训练素材一般挑 4–5</span></div>
+        <div class="editrow">
+          <span class="seg" id="vRate">
+            ${[1,2,3,4,5].map(n=>`<button data-v="${n}" class="${v.rating===n?'on':''}">${n}</button>`).join('')}
+            <button data-v="0" class="${v.rating==null?'on':''}">未评</button>
+          </span>
+        </div>
+        <div class="editrow"><label>备注 <span class="dim">念得好/不好在哪</span></label>
+          <input id="vNote" value="${esc(v.note||'')}" placeholder="例如：语气自然，但「鲸」字咬得重"></div>
+        <div class="sectitle">只读</div>
+        <div class="kv">
+          <div class="k">文本</div><div class="v">${esc(v.text||'—')}</div>
+          <div class="k">说话人</div><div class="v mono">${esc(v.speaker)}</div>
+          <div class="k">音色/风格</div><div class="v mono">${esc([v.voice,v.style].filter(Boolean).join(' / ')||'—')}</div>
+          <div class="k">时长</div><div class="v mono">${v.duration_ms?(v.duration_ms/1000).toFixed(2)+' 秒':'—'}</div>
+          <div class="k">文件</div><div class="v mono" style="font-size:11.5px">${esc(v.file)}</div>
+          <div class="k">下载</div><div class="v"><a href="/v1/voice/${encodeURIComponent(v.id)}/file" download>点这里</a></div>
+        </div>`,
+        `<button class="primary" id="vSave">保存</button>
+         <button class="danger" id="vDel">删除</button>
+         <span class="sp"></span>`);
+      $('vRate').querySelectorAll('button').forEach(b=>{
+        b.onclick=()=>{$('vRate').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+      });
+      $('vSave').onclick=async()=>{
+        const on=$('vRate').querySelector('button.on');
+        const n = on ? +on.dataset.v : 0;
+        try{
+          await apiDo('PATCH','/v1/voice/'+encodeURIComponent(v.id),{
+            rating: n===0 ? undefined : n,
+            note: $('vNote').value
+          });
+          toast('已保存'); closeDrawer(); render();
+        }catch(e){ toast('保存失败：'+e.message, true); }
+      };
+      $('vDel').onclick=async()=>{
+        if(!confirm('删除这条语音？（逻辑删除，文件保留）')) return;
+        try{ await apiDo('DELETE','/v1/voice/'+encodeURIComponent(v.id));
+          toast('已删除'); closeDrawer(); render(); }
+        catch(e){ toast('删除失败：'+e.message, true); }
+      };
+    };
+  });
 }
 
 // ---------- 人格

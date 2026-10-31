@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 /// 数据库句柄。
 ///
@@ -360,6 +360,7 @@ impl Db {
 pub const TABLES: &[&str] = &[
     "channel",
     "persona",
+    "voice",
     "person",
     "person_account",
     "person_scene",
@@ -441,6 +442,37 @@ CREATE TABLE IF NOT EXISTS persona (
   updated_ms  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS persona_priority ON persona(priority DESC, created_ms DESC);
+
+-- 语音库：发出去的语音存下来，供人工筛选后训练更好的音源。
+--
+-- 为什么存 m4a 而不是原格式：训练工具链普遍吃 m4a/wav，而 m4a
+-- 比 wav 小一个数量级（1 分钟约 0.5MB vs 10MB），几十条就能听出好坏，
+-- 上千条也不会把盘塞满。
+CREATE TABLE IF NOT EXISTS voice (
+  id          TEXT PRIMARY KEY,
+  -- 文件名（不含目录）。实际文件在 data_dir/voices/ 下。
+  file        TEXT NOT NULL,
+  -- 时长毫秒；拿不到时是 NULL，不瞎填。
+  duration_ms INTEGER,
+  bytes       INTEGER NOT NULL,
+  -- 这段语音对应的文本（合成前的那句话），试听时一起看
+  text        TEXT,
+  -- 谁说的：`owner` = 它自己；或接入方自定义（主播、某角色…）
+  speaker     TEXT NOT NULL DEFAULT 'default',
+  -- 用的声音/风格（feiyu:cute 之类），方便对比
+  voice       TEXT,
+  style       TEXT,
+  -- 人工打分 1..5，NULL = 还没评
+  rating      INTEGER,
+  note        TEXT,
+  -- 来源渠道 tag，与 event.channel 同一套
+  channel     TEXT,
+  created_ms  INTEGER NOT NULL,
+  updated_ms  INTEGER NOT NULL,
+  deleted_by  INTEGER
+);
+CREATE INDEX IF NOT EXISTS voice_recent ON voice(created_ms DESC);
+CREATE INDEX IF NOT EXISTS voice_rating ON voice(rating DESC) WHERE rating IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS person_account (
   channel       TEXT NOT NULL,         -- mc / qq / live / system

@@ -409,6 +409,11 @@ impl Config {
         self.data_dir.join("snapshots")
     }
 
+    /// 语音库文件目录。与数据库同目录下，备份时跟着数据目录一起走。
+    pub fn voice_dir(&self) -> PathBuf {
+        self.data_dir.join("voices")
+    }
+
     /// 把数据目录标准化（不要求存在）。
     pub fn normalize_paths(&mut self) {
         self.data_dir = normalize(&self.data_dir);

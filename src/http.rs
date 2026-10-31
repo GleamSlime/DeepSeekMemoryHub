@@ -309,6 +309,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/name/normalize", post(normalize_names))
         .route("/v1/channel/list", get(list_channels))
         .route("/v1/person/ignored", get(person_ignored_check))
+        .route("/v1/voice", post(upload_voice).get(list_voice))
+        .route(
+            "/v1/voice/{id}",
+            get(download_voice).patch(patch_voice).delete(delete_voice),
+        )
+        .route("/v1/voice/{id}/file", get(stream_voice))
         .route("/v1/snapshot", post(take_snapshot))
         .route("/v1/snapshot/list", get(list_snapshots))
         .route("/v1/rollback", post(do_rollback))
@@ -2646,6 +2652,275 @@ async fn person_ignored_check(
     .await
     .map_err(|e| Error::Storage(format!("忽视查询失败：{e}")))??;
     Ok(Json(out))
+}
+
+// ------------------------------------------------------------------ 语音库
+
+/// 上传一条语音（multipart）。
+///
+/// 字段：`file`（必填，二进制）+ 可选 `text` / `speaker` / `voice` / `style` /
+/// `channel` / `rating` / `note`。
+///
+/// 为什么不收 base64：语音动辄几百 KB，base64 会再胖 33%，
+/// 而且 multipart 是各家 HTTP 客户端都原生支持的。
+async fn upload_voice(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mut mp: axum::extract::Multipart,
+) -> ApiResult<serde_json::Value> {
+    check_token(&st, &headers)?;
+
+    let mut data: Option<Vec<u8>> = None;
+    let mut meta = crate::voice::Meta::default();
+
+    while let Some(field) = mp
+        .next_field()
+        .await
+        .map_err(|e| Error::BadRequest(format!("读取上传内容失败：{e}")))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| Error::BadRequest(format!("读取音频失败：{e}")))?
+                .to_vec();
+            data = Some(bytes);
+            continue;
+        }
+        let val = field
+            .text()
+            .await
+            .map_err(|e| Error::BadRequest(format!("读取字段 {name} 失败：{e}")))?;
+        let v = val.trim().to_string();
+        if v.is_empty() {
+            continue;
+        }
+        match name.as_str() {
+            "text" => meta.text = Some(v),
+            "speaker" => meta.speaker = Some(v),
+            "voice" => meta.voice = Some(v),
+            "style" => meta.style = Some(v),
+            "channel" => {
+                // 与事件同一套渠道校验：拼错的 tag 当场报，不悄悄存
+                meta.channel = Some(check_channel(&st, &v)?);
+            }
+            "rating" => {
+                let r: i64 = v
+                    .parse()
+                    .map_err(|_| Error::BadRequest("rating 必须是整数".into()))?;
+                meta.rating = Some(crate::voice::check_rating(r)?);
+            }
+            "note" => meta.note = Some(v),
+            _ => {}
+        }
+    }
+
+    let data = data.ok_or_else(|| Error::BadRequest("缺少 file 字段".into()))?;
+    if data.is_empty() {
+        return Err(Error::BadRequest("音频是空的".into()));
+    }
+
+    let id = format!("v-{}-{}", now_ms(), rand_suffix());
+    let dir = st.cfg.voice_dir();
+    let id2 = id.clone();
+    let (file, bytes, dur) =
+        tokio::task::spawn_blocking(move || crate::voice::store_file(&dir, &id2, &data))
+            .await
+            .map_err(|e| Error::Storage(format!("保存语音失败：{e}")))??;
+
+    let db = st.db.clone();
+    let id3 = id.clone();
+    let file_for_db = file.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let now = now_ms();
+            tx.execute(
+                "INSERT INTO voice(id, file, duration_ms, bytes, text, speaker,
+                                   voice, style, rating, note, channel,
+                                   created_ms, updated_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
+                rusqlite::params![
+                    id3,
+                    file_for_db,
+                    dur,
+                    bytes,
+                    meta.text,
+                    meta.speaker.unwrap_or_else(|| "default".into()),
+                    meta.voice,
+                    meta.style,
+                    meta.rating,
+                    meta.note,
+                    meta.channel,
+                    now
+                ],
+            )?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("写入语音记录失败：{e}")))??;
+
+    Ok(Json(serde_json::json!({
+        "ok": true, "id": id, "file": file,
+        "bytes": bytes, "duration_ms": dur,
+    })))
+}
+
+#[derive(Deserialize)]
+struct VoiceListQuery {
+    /// 只列打过分的（挑训练素材时用）。
+    #[serde(default)]
+    rated: Option<u8>,
+    limit: Option<usize>,
+}
+
+async fn list_voice(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<VoiceListQuery>,
+) -> ApiResult<Vec<crate::voice::VoiceItem>> {
+    check_token(&st, &headers)?;
+    let db = st.db.clone();
+    let only_rated = q.rated.unwrap_or(0) != 0;
+    let limit = q.limit.unwrap_or(100);
+    let items = tokio::task::spawn_blocking(move || crate::voice::list(&db, only_rated, limit))
+        .await
+        .map_err(|e| Error::Storage(format!("语音列表失败：{e}")))??;
+    Ok(Json(items))
+}
+
+async fn download_voice(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<crate::voice::VoiceItem> {
+    check_token(&st, &headers)?;
+    let db = st.db.clone();
+    let id2 = id.clone();
+    let item = tokio::task::spawn_blocking(move || crate::voice::get(&db, &id2))
+        .await
+        .map_err(|e| Error::Storage(format!("语音查询失败：{e}")))??;
+    item.map(Json)
+        .ok_or_else(|| Error::NotFound(format!("语音 {id}")))
+}
+
+/// 把音频字节流出去（面板试听、训练脚本拉文件都走它）。
+async fn stream_voice(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let deny = |code: StatusCode| (code, "无法读取这条语音").into_response();
+    if check_token(&st, &headers).is_err() {
+        return deny(StatusCode::UNAUTHORIZED);
+    }
+    let db = st.db.clone();
+    let id_q = id.clone();
+    let item = match tokio::task::spawn_blocking(move || crate::voice::get(&db, &id_q)).await {
+        Ok(Ok(Some(v))) => v,
+        Ok(Ok(None)) => return deny(StatusCode::NOT_FOUND),
+        _ => return deny(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let dir = st.cfg.voice_dir();
+    let Some(path) = crate::voice::resolve_file(&dir, &item.file) else {
+        return deny(StatusCode::NOT_FOUND);
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return deny(StatusCode::NOT_FOUND);
+    };
+    let mime = match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "m4a" | "mp4" => "audio/mp4",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "silk" => "application/octet-stream",
+        _ => "application/octet-stream",
+    };
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                &*format!("inline; filename=\"{}\"", item.file),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct VoicePatch {
+    rating: Option<i64>,
+    /// `Some("")` = 清空；没这个字段 = 不动。
+    note: Option<String>,
+    speaker: Option<String>,
+}
+
+async fn patch_voice(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(p): Json<VoicePatch>,
+) -> ApiResult<serde_json::Value> {
+    // 面板里打分/写备注 —— 允许会话（人点的）。
+    check_token_or_session(&st, &headers)?;
+    if let Some(r) = p.rating {
+        crate::voice::check_rating(r)?;
+    }
+    let db = st.db.clone();
+    let id2 = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let note_set = p.note.is_some();
+            let note_val = p.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let n = tx.execute(
+                "UPDATE voice SET
+                   rating = COALESCE(?1, rating),
+                   note = CASE WHEN ?2 THEN ?3 ELSE note END,
+                   speaker = COALESCE(?4, speaker),
+                   updated_ms = ?5
+                 WHERE id = ?6 AND deleted_by IS NULL",
+                rusqlite::params![p.rating, note_set, note_val, p.speaker, now_ms(), id2],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("语音 {id2}")));
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("更新语音失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn delete_voice(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    check_token_or_session(&st, &headers)?;
+    let db = st.db.clone();
+    let id2 = id.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        db.with_write(|tx| {
+            let now = now_ms();
+            let n = tx.execute(
+                "UPDATE voice SET deleted_by = 1, updated_ms = ?1
+                 WHERE id = ?2 AND deleted_by IS NULL",
+                rusqlite::params![now, id2],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("语音 {id2}")));
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("删除语音失败：{e}")))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ------------------------------------------------------------------ 称呼归一

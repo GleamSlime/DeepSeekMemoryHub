@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["trace", "limit", "timeout"] }
 serde = { version = "1", features = ["derive"] }

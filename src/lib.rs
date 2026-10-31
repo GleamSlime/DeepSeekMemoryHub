@@ -30,6 +30,7 @@ pub mod query;
 pub mod rank;
 pub mod rollback;
 pub mod snapshot;
+pub mod voice;
 pub mod webui;
 pub mod weight;
 

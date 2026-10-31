@@ -3664,3 +3664,142 @@ async fn 承诺可以逻辑删除() {
         .unwrap();
     assert_eq!(n, 1, "逻辑删除要保留数据");
 }
+
+// ================================================================== 语音库
+
+/// 造一个最小的 WAV（44 字节头 + 静音）。
+fn tiny_wav() -> Vec<u8> {
+    let sample_rate = 8000u32;
+    let samples = 800u32; // 0.1 秒
+    let data_len = samples * 2;
+    let mut v = Vec::new();
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&(36 + data_len).to_le_bytes());
+    v.extend_from_slice(b"WAVEfmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    v.extend_from_slice(&1u16.to_le_bytes()); // mono
+    v.extend_from_slice(&sample_rate.to_le_bytes());
+    v.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    v.extend_from_slice(&2u16.to_le_bytes());
+    v.extend_from_slice(&16u16.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&data_len.to_le_bytes());
+    v.extend(std::iter::repeat(0u8).take(data_len as usize));
+    v
+}
+
+#[tokio::test]
+async fn 语音能上传列表下载并打分() {
+    let s = TestServer::start().await;
+    let wav = tiny_wav();
+    let boundary = "----test-boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(&wav);
+    body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"text\"\r\n\r\n");
+    body.extend_from_slice("今天也要好好吃饭".as_bytes());
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let r = TestServer::client()
+        .post(format!("{}/v1/voice", s.base))
+        .header("x-api-token", TOKEN)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let st = r.status();
+    let txt = r.text().await.unwrap();
+    assert_eq!(st, 200, "上传应成功：{txt}");
+    let j: serde_json::Value = serde_json::from_str(&txt).unwrap();
+    let id = j["id"].as_str().unwrap().to_string();
+    assert!(!j["file"].as_str().unwrap().is_empty());
+
+    // 列表
+    let list: serde_json::Value = s.get("/v1/voice").await.json().await.unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["text"], "今天也要好好吃饭");
+    assert!(list[0]["rating"].is_null());
+
+    // 下载字节：装了 ffmpeg 就转成 m4a，没装就原样存 wav —— 两种都正确。
+    let r = s.get(&format!("/v1/voice/{id}/file")).await;
+    assert_eq!(r.status(), 200);
+    let ctype = r
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let bytes = r.bytes().await.unwrap();
+    if ctype == "audio/mp4" {
+        assert_eq!(&bytes[4..8], b"ftyp", "转成 m4a 后应是 mp4 容器");
+    } else {
+        assert_eq!(ctype, "audio/wav");
+        assert_eq!(&bytes[0..4], b"RIFF", "没 ffmpeg 时应原样存下来");
+    }
+
+    // 打分 + 备注
+    let r = TestServer::client()
+        .patch(format!("{}/v1/voice/{id}", s.base))
+        .header("x-api-token", TOKEN)
+        .json(&serde_json::json!({"rating":5,"note":"语气自然"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let list: serde_json::Value = s.get("/v1/voice?rated=1").await.json().await.unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1, "只看打过分的能筛出来");
+    assert_eq!(list[0]["rating"], 5);
+    assert_eq!(list[0]["note"], "语气自然");
+}
+
+#[tokio::test]
+async fn 语音评分超范围会被拒() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO voice(id, file, bytes, speaker, created_ms, updated_ms)
+             VALUES ('v1','v1.m4a',100,'default',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    for bad in [0, 6, -1] {
+        let r = TestServer::client()
+            .patch(format!("{}/v1/voice/v1", s.base))
+            .header("x-api-token", TOKEN)
+            .json(&serde_json::json!({"rating": bad}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "评分 {bad} 应被拒");
+    }
+}
+
+#[tokio::test]
+async fn 语音文件名不能越界读文件() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO voice(id, file, bytes, speaker, created_ms, updated_ms)
+             VALUES ('v2','../../etc/passwd',1,'default',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let r = s.get("/v1/voice/v2/file").await;
+    assert_eq!(r.status(), 404, "越界路径必须拿不到文件");
+}

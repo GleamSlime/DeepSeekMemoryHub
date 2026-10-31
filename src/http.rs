@@ -1998,6 +1998,29 @@ fn load_group_block(db: &Db, scene: crate::context::Scene) -> Result<Vec<GroupLi
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows.reverse();
+        // 群里最近说的话里，发送者用**身份显示名**而不是群名片：
+        // 群名片随时会改（啥子猫 → 啥子喵），模型认不出「这是同一个人」。
+        // 优先按 QQ 号认人（账号绑定最稳），名字只作兜底。
+        let names = crate::query::sender_display_names(c)?;
+        for (name, account, content) in rows.iter_mut() {
+            if let Some(acc) = account.as_deref() {
+                if let Some(display) = names.by_account.get(acc) {
+                    *name = Some(display.clone());
+                }
+            }
+            if let Some(cur) = name.as_deref() {
+                if let Some(display) = names.by_name.get(&cur.to_lowercase()) {
+                    *name = Some(display.clone());
+                }
+            }
+            // 内容里的 @昵称 也换掉（QQ 的 @ 在这里是纯文本，例如
+            // 「@啥子喵(478889187) 姆姆又偷偷加强自己了」）。
+            for (from, to) in &names.aliases {
+                if content.contains(from) {
+                    *content = content.replace(from, to);
+                }
+            }
+        }
         Ok(rows)
     })
 }

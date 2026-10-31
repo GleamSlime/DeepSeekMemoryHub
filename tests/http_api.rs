@@ -2712,3 +2712,94 @@ async fn 歧义称呼不会把人带进上下文() {
         "有歧义的称呼不能当触发词：{j}"
     );
 }
+
+// ================================================================== 群消息发送者映射
+
+fn seed_group_identity(s: &TestServer) {
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms)
+             VALUES ('p1','姆姆','confirmed',1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO person_account(channel, account, person_id, seen_name,
+                                        first_seen_ms, last_seen_ms)
+             VALUES ('qq','478889187','p1','啥子猫',1,1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO person_scene(person_id, scene, name, updated_ms)
+             VALUES ('p1','qq_group','啥子猫',1)",
+            [],
+        )?;
+        // 群名片已经改成「啥子喵」，面板里的人工值还是旧的「啥子猫」
+        for (account, sender, content, at) in [
+            (
+                "478889187",
+                "啥子喵",
+                "@啥子喵(478889187) 今天也在挖矿",
+                100,
+            ),
+            // 没绑账号、但名字能对上的人（名字兜底）
+            ("600000", "啥子猫", "对，我也在", 200),
+            ("700000", "陌生人", "路过", 300),
+        ] {
+            tx.execute(
+                "INSERT INTO channel_message(channel, group_id, account, sender_name, content, at_ms)
+                 VALUES ('qq','g1',?1,?2,?3,?4)",
+                rusqlite::params![account, sender, content, at],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn 群消息发送者显示身份名而不是群名片() {
+    let s = TestServer::start().await;
+    seed_group_identity(&s);
+
+    let r = s.get("/v1/context?scene=group&q=今天").await;
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(
+        text.contains("姆姆：@姆姆(478889187) 今天也在挖矿"),
+        "按 QQ 号映射成身份名，内容里的 @昵称 也要换：{text}"
+    );
+    assert!(
+        text.contains("姆姆：对，我也在"),
+        "名字兜底也要能映射：{text}"
+    );
+    assert!(
+        text.contains("陌生人：路过"),
+        "没绑定、名字也对不上的人保持原样"
+    );
+    assert!(!text.contains("啥子喵"), "群名片不该再出现：{text}");
+}
+
+#[tokio::test]
+async fn 群名片改名后称呼归一仍然认得出() {
+    let s = TestServer::start().await;
+    seed_group_identity(&s);
+
+    // 面板人工值是旧「啥子猫」，但群里最新名片是「啥子喵」——两个都要换成显示名
+    let r = s
+        .post(
+            "/v1/name/normalize",
+            serde_json::json!({"text": "啥子喵和啥子猫都在"}),
+        )
+        .await;
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["text"], "姆姆和姆姆都在");
+
+    // 上下文里提到新名片也要能触发称呼对照
+    let r = s.get("/v1/context?q=啥子喵呢").await;
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert!(
+        j["parts"].as_array().unwrap().iter().any(|p| p == "names"),
+        "改名后的名片也要能触发 names：{j}"
+    );
+}

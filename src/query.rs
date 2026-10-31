@@ -1013,13 +1013,17 @@ pub fn name_mappings(db: &Db, scene: Option<&str>) -> Result<Vec<NameMapping>> {
         let mut map: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         for (pid, display) in persons {
-            for s in scenes_for(&pid, &data) {
+            let mut candidates: Vec<(String, String)> = scenes_for(&pid, &data)
+                .into_iter()
+                .filter_map(|s| s.name.map(|n| (s.scene, n)))
+                .collect();
+            candidates.extend(observed_aliases(&pid, &data));
+            for (sc, name) in candidates {
                 if let Some(want) = scene {
-                    if s.scene != want {
+                    if sc != want {
                         continue;
                     }
                 }
-                let Some(name) = s.name else { continue };
                 let name = name.trim().to_string();
                 if name.chars().count() < 2 || name == display {
                     continue;
@@ -1043,6 +1047,129 @@ pub fn name_mappings(db: &Db, scene: Option<&str>) -> Result<Vec<NameMapping>> {
         // 长名字先替换：避免「啥子猫」被「啥子」先吃掉一部分。
         out.sort_by_key(|m| std::cmp::Reverse(m.from.chars().count()));
         Ok(out)
+    })
+}
+
+/// 一个人的所有「他可能被叫到的名字」：显示名 + 各场景称呼 + 最近观测到的群名片 + 账号名。
+///
+/// 为什么要拼这么多来源：群名片会改（「啥子猫」→「啥子喵」），而面板里的人工值
+/// 未必跟着改。只认面板值，改名之后就会出现「明明是同一个人，就是不肯换」。
+/// 歧义由调用方按「同名指向两人则不认」处理。
+/// 不在 person_scene 里、但确实见过的叫法：最近的群名片、各渠道账号名。
+fn observed_aliases(pid: &str, data: &SceneData) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(g) = data.group_names.get(pid) {
+        out.push(("qq_group".to_string(), g.clone()));
+    }
+    if let Some(list) = data.accounts.get(pid) {
+        for (channel, _, seen) in list {
+            if let Some(n) = seen {
+                out.push((channel.clone(), n.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn alias_names(pid: &str, display: &str, data: &SceneData) -> Vec<String> {
+    let mut names = vec![display.to_string()];
+    for s in scenes_for(pid, data) {
+        if let Some(n) = s.name {
+            names.push(n);
+        }
+    }
+    if let Some(g) = data.group_names.get(pid) {
+        names.push(g.clone());
+    }
+    if let Some(list) = data.accounts.get(pid) {
+        for (_, _, seen) in list {
+            if let Some(n) = seen {
+                names.push(n.clone());
+            }
+        }
+    }
+    names.retain(|n| !n.trim().is_empty());
+    names
+}
+
+/// 群消息的发送者 → 身份显示名。返回 `(账号映射, 名字映射)`。
+///
+/// **优先按 QQ 号认人**：群名片随时会改，账号不会。名字只作兜底（没绑过账号的人）。
+/// 名字有歧义（两个人同名）时不进映射。
+pub(crate) struct SenderNames {
+    /// QQ 号 → 显示名
+    pub by_account: std::collections::HashMap<String, String>,
+    /// 名字（小写）→ 显示名（仅无歧义的名字）
+    pub by_name: std::collections::HashMap<String, String>,
+    /// 原文 → 显示名，长名字在前。用于把消息**内容**里的 @昵称 也换掉。
+    pub aliases: Vec<(String, String)>,
+}
+
+pub(crate) fn sender_display_names(c: &rusqlite::Connection) -> Result<SenderNames> {
+    let mut by_account: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = c.prepare(
+            "SELECT pa.account, p.display_name FROM person_account pa
+             JOIN person p ON p.person_id = pa.person_id
+             WHERE pa.channel = 'qq'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (account, display) = row?;
+            by_account.insert(account, display);
+        }
+    }
+
+    let mut persons: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = c.prepare("SELECT person_id, display_name FROM person")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            persons.push(row?);
+        }
+    }
+    let data = load_scene_data(c)?;
+    let mut owner: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for (pid, display) in &persons {
+        for name in alias_names(pid, display, &data) {
+            let name = name.trim().to_lowercase();
+            if name.chars().count() < 2 {
+                continue;
+            }
+            match owner.get(&name) {
+                None => {
+                    owner.insert(name, Some(pid.clone()));
+                }
+                Some(Some(other)) if other != pid => {
+                    owner.insert(name, None);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut by_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    for (pid, display) in persons {
+        for name in alias_names(&pid, &display, &data) {
+            let original = name.trim().to_string();
+            let key = original.to_lowercase();
+            if key.chars().count() < 2 || original == display {
+                continue;
+            }
+            if owner.get(&key).and_then(|o| o.as_ref()) == Some(&pid) {
+                by_name.insert(key, display.clone());
+                aliases.push((original, display.clone()));
+            }
+        }
+    }
+    aliases.sort_by_key(|(from, _)| std::cmp::Reverse(from.chars().count()));
+    aliases.dedup();
+    Ok(SenderNames {
+        by_account,
+        by_name,
+        aliases,
     })
 }
 
@@ -1077,9 +1204,7 @@ pub fn persons_mentioned(db: &Db, text: &str, limit: usize) -> Result<Vec<Person
         let mut owner: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         for (pid, display) in &persons {
-            let mut names: Vec<String> = vec![display.clone()];
-            names.extend(scenes_for(pid, &data).into_iter().filter_map(|s| s.name));
-            for name in names {
+            for name in alias_names(pid, display, &data) {
                 let name = name.trim().to_lowercase();
                 if name.chars().count() < 2 {
                     continue;
@@ -1099,8 +1224,7 @@ pub fn persons_mentioned(db: &Db, text: &str, limit: usize) -> Result<Vec<Person
         let mut out = Vec::new();
         for (pid, display) in persons {
             let scenes = scenes_for(&pid, &data);
-            let mut names: Vec<String> = vec![display.clone()];
-            names.extend(scenes.iter().filter_map(|s| s.name.clone()));
+            let names = alias_names(&pid, &display, &data);
             let hit = names.iter().any(|n| {
                 let n = n.trim().to_lowercase();
                 n.chars().count() >= 2

@@ -729,6 +729,35 @@ async fn post_event(
         return Err(Error::BadRequest("importance 必须在 [0,1]".into()));
     }
 
+    // 摘要里的昵称换成身份显示名。
+    //
+    // 为什么在**入库时**做（而不是只在读的时候）：
+    //   · 群名片会改（啥子猫 → 啥子喵），历史记录里留着旧名字，之后就再也关联不上了；
+    //   · 换成显示名之后，同一个人的所有事件天然可用一个词检索到。
+    // 只按**这条事件自己的渠道**查映射，不做全渠道查找 —— 一个 QQ 群的聊天
+    // 里出现 MC 名是很可疑的，不该顺手改掉。
+    let summary = if body.summary.trim().is_empty() {
+        String::new()
+    } else {
+        let mappings = crate::query::name_mappings_for_channel(&st.db, &channel)?;
+        if mappings.is_empty() {
+            body.summary.clone()
+        } else {
+            let (fixed, hits) = crate::query::replace_names(&body.summary, &mappings);
+            if !hits.is_empty() {
+                tracing::debug!(
+                    "事件摘要归一：{} 处（{}）",
+                    hits.len(),
+                    hits.iter()
+                        .map(|(f, t, _)| format!("{f}→{t}"))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                );
+            }
+            fixed
+        }
+    };
+
     let at = body.at_ms.unwrap_or_else(now_ms);
     let scope = Scope::parse(&body.scope);
     let db = st.db.clone();
@@ -762,9 +791,9 @@ async fn post_event(
                     body.person_id,
                     at,
                     body.kind,
-                    channel.as_str(),
+                    channel,
                     body.channel_day,
-                    body.summary,
+                    summary,
                     body.importance,
                     scope.as_str(),
                     dedup,

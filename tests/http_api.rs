@@ -3234,3 +3234,113 @@ async fn 没绑过账号的人不算被忽视() {
     assert_eq!(j["ignored"], false, "不认识不等于忽视：{j}");
     assert!(j["person_id"].is_null());
 }
+
+// ================================================================== 事件摘要里的昵称归一
+
+fn seed_group_person(s: &TestServer) {
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms)
+             VALUES ('p1','姆姆','confirmed',1)",
+            [],
+        )?;
+        for (scene, name) in [
+            ("mc", "GleamSlime"),
+            ("qq_group", "啥子猫"),
+            ("qq", "=ᗜωᗜ="),
+        ] {
+            tx.execute(
+                "INSERT INTO person_scene(person_id, scene, name, updated_ms)
+                 VALUES ('p1',?1,?2,1)",
+                rusqlite::params![scene, name],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn 事件入库时按渠道把群名片换成显示名() {
+    let s = TestServer::start().await;
+    seed_group_person(&s);
+
+    // qq 渠道 → 群名片和私聊昵称都认
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({
+                "channel":"qq","kind":"group.said",
+                "summary":"啥子猫在群里说：怎么还藏私明明还有"
+            }),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+
+    let summary: String =
+        s.db.with_read(|c| {
+            Ok(c.query_row(
+                "SELECT summary FROM event ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        summary, "姆姆在群里说：怎么还藏私明明还有",
+        "入库时就该换成显示名，而不是等读的时候"
+    );
+}
+
+#[tokio::test]
+async fn 事件归一不做全渠道匹配() {
+    let s = TestServer::start().await;
+    seed_group_person(&s);
+
+    // mc 渠道的事件里出现 QQ 群名片「啥子猫」——不该被改。
+    // 理由：这条事件自己的渠道是 mc，QQ 的名片出现在这里很可疑，
+    // 顺手改掉会掩盖真正的数据问题。
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({
+                "channel":"mc","kind":"chat","summary":"有人说啥子猫很可爱"
+            }),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let summary: String =
+        s.db.with_read(|c| {
+            Ok(c.query_row(
+                "SELECT summary FROM event ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        summary, "有人说啥子猫很可爱",
+        "mc 事件不该被 QQ 名片的映射改掉"
+    );
+
+    // 但 MC 名（同渠道）照改
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({
+                "channel":"mc","kind":"chat","summary":"GleamSlime 进服了"
+            }),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let summary: String =
+        s.db.with_read(|c| {
+            Ok(c.query_row(
+                "SELECT summary FROM event ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(summary, "姆姆 进服了");
+}

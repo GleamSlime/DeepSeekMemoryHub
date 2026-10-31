@@ -1332,6 +1332,43 @@ pub fn persons_mentioned(db: &Db, text: &str, limit: usize) -> Result<Vec<Person
     })
 }
 
+/// 渠道 tag → 与它相关的「场景」列表。
+///
+/// 为什么需要这一层：`channel` 是可自定义的 tag（`bilibili`），而「各场景里的称呼」
+/// 用的是固定四个场景（mc / qq / qq_group / live）。两者不是一一对应 ——
+/// 一个 `qq` 渠道同时覆盖私聊和群名片两种叫法。
+///
+/// 未知渠道按「场景 = tag 本身」处理，这样用户新建的 `bilibili` 渠道
+/// 只要在身份页也填了同名场景，就照样能归一。
+pub fn scenes_for_channel(channel: &str) -> Vec<String> {
+    match channel {
+        "mc" => vec!["mc".into()],
+        // QQ 一个渠道两种叫法：私聊昵称和群名片。两个都要认。
+        "qq" => vec!["qq".into(), "qq_group".into()],
+        "live" => vec!["live".into()],
+        other => vec![other.to_string()],
+    }
+}
+
+/// 按渠道取「昵称 → 身份显示名」的映射，供事件入库时替换摘要。
+///
+/// 与 `/v1/name/normalize` 的区别：那个是**调用方发送前**改写整段回复；
+/// 这个是**入库时**改写摘要，让记忆里从一开始就是统一的名字 ——
+/// 否则群名片改一次，历史记录里就留下一串再也不认识的名字。
+pub fn name_mappings_for_channel(db: &Db, channel: &str) -> Result<Vec<NameMapping>> {
+    let mut out: Vec<NameMapping> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for scene in scenes_for_channel(channel) {
+        for m in name_mappings(db, Some(&scene))? {
+            if seen.insert(m.from.clone()) {
+                out.push(m);
+            }
+        }
+    }
+    out.sort_by_key(|m| std::cmp::Reverse(m.from.chars().count()));
+    Ok(out)
+}
+
 /// 把文本里的场景称呼替换成身份显示名。
 ///
 /// 返回 `(新文本, [(原称呼, 显示名, 次数)])`。纯函数，方便单测。

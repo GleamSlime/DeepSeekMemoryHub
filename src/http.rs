@@ -649,8 +649,12 @@ struct NewEvent {
     at_ms: Option<i64>,
     kind: String,
     summary: String,
-    #[serde(default = "half")]
-    importance: f64,
+    /// 调用方给的重要度。`null` / 不传 = 让中枢**自动判定**（推荐）。
+    ///
+    /// 之前这里默认 0.5、面板上再被写死成 0.3/0.6，于是「被炸死」和
+    /// 「今天天气不错」在检索里权重一样。现在不传就自动算。
+    #[serde(default)]
+    importance: Option<f64>,
     #[serde(default = "default_scope")]
     scope: String,
     person_id: Option<String>,
@@ -725,8 +729,10 @@ async fn post_event(
             }));
         }
     }
-    if !(0.0..=1.0).contains(&body.importance) {
-        return Err(Error::BadRequest("importance 必须在 [0,1]".into()));
+    if let Some(v) = body.importance {
+        if !(0.0..=1.0).contains(&v) {
+            return Err(Error::BadRequest("importance 必须在 [0,1]".into()));
+        }
     }
 
     // 摘要里的昵称换成身份显示名。
@@ -758,6 +764,38 @@ async fn post_event(
         }
     };
 
+    // 重要度：调用方给了就用它的（记 `caller`），没给就自动判定（记 `auto`）。
+    //
+    // 自动判定用四个维度：事件类型基底、涉及的人与它多亲近、
+    // 摘要命中了几条既有事实、有没有提到它自己。理由存进 `importance_reason`，
+    // 面板上能直接看到「这 0.78 是怎么来的」，不用事后推算。
+    let (importance, importance_source, importance_reason) = match body.importance {
+        Some(v) => (v, "caller", None),
+        None => {
+            let closeness = match body.person_id.as_deref().filter(|s| !s.is_empty()) {
+                Some(pid) => crate::query::closeness_of(&st.db, pid)?,
+                None => None,
+            };
+            let fact_hits = crate::query::fact_hits_for(&st.db, &summary)?;
+            // 「提到自己」：摘要里出现它在各场景里的任一称呼（≥2 字）。
+            let self_names = crate::query::name_mappings(&st.db, None)?;
+            let mentions_self = self_names.iter().any(|m| summary.contains(&m.to));
+            let input = crate::importance::ImportanceInput {
+                kind: body.kind.clone(),
+                summary: summary.clone(),
+                closeness,
+                fact_hits,
+                mentions_self,
+            };
+            let w = crate::importance::ImportanceWeights::default();
+            (
+                crate::importance::score(&input, &w),
+                "auto",
+                Some(crate::importance::explain(&input, &w).join("；")),
+            )
+        }
+    };
+
     let at = body.at_ms.unwrap_or_else(now_ms);
     let scope = Scope::parse(&body.scope);
     let db = st.db.clone();
@@ -785,8 +823,9 @@ async fn post_event(
             }
             tx.execute(
                 "INSERT INTO event(person_id, at_ms, kind, channel, channel_day,
-                                   summary, importance, scope, dedup_key)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                                   summary, importance, scope, dedup_key,
+                                   importance_source, importance_reason)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 rusqlite::params![
                     body.person_id,
                     at,
@@ -794,9 +833,11 @@ async fn post_event(
                     channel,
                     body.channel_day,
                     summary,
-                    body.importance,
+                    importance,
                     scope.as_str(),
                     dedup,
+                    importance_source,
+                    importance_reason,
                 ],
             )?;
             Ok(WriteResult {
@@ -882,6 +923,10 @@ struct EventRow {
     /// 当前权重（含衰减与渠道可信度）。前端排序用这个，不用 importance。
     weight: f64,
     channel_day: Option<String>,
+    /// 重要度是谁定的：`auto` / `caller` / `manual`。
+    importance_source: Option<String>,
+    /// 自动判定的逐项依据。
+    importance_reason: Option<String>,
 }
 
 async fn list_events(
@@ -901,7 +946,8 @@ async fn list_events(
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<EventRow>> {
         db.with_read(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, at_ms, kind, channel, summary, importance, channel_day
+                "SELECT id, at_ms, kind, channel, summary, importance,
+                        channel_day, importance_source, importance_reason
                  FROM event WHERE deleted_by IS NULL
                  ORDER BY at_ms DESC LIMIT ?1",
             )?;
@@ -930,6 +976,8 @@ async fn list_events(
                         importance,
                         weight: w,
                         channel_day: r.get(6)?,
+                        importance_source: r.get(7)?,
+                        importance_reason: r.get(8)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2732,11 +2780,17 @@ async fn patch_event(
             }
             // COALESCE 让「没传的字段保持原值」成立，不必先读一遍再全量写回。
             let n = tx.execute(
+                // 人改了重要度 → 来源标成 manual，并把自动依据清掉。
+                // 否则面板上会出现「标着自动、值却被人改过」这种自相矛盾的显示。
                 "UPDATE event SET
                    summary    = COALESCE(?1, summary),
                    importance = COALESCE(?2, importance),
                    kind       = COALESCE(?3, kind),
-                   scope      = COALESCE(?4, scope)
+                   scope      = COALESCE(?4, scope),
+                   importance_source = CASE WHEN ?2 IS NULL THEN importance_source
+                                            ELSE 'manual' END,
+                   importance_reason = CASE WHEN ?2 IS NULL THEN importance_reason
+                                            ELSE NULL END
                  WHERE id = ?5",
                 rusqlite::params![p.summary, p.importance, p.kind, p.scope, id],
             )?;

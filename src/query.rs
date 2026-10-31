@@ -80,6 +80,10 @@ pub struct EventItem {
     pub person_id: Option<String>,
     pub channel_day: Option<String>,
     pub dedup_key: Option<String>,
+    /// 重要度是谁定的：`auto`（中枢自动）/ `caller`（调用方传的）/ `manual`（人改的）。
+    pub importance_source: Option<String>,
+    /// 自动判定的逐项依据，面板上直接显示「这 0.78 是怎么来的」。
+    pub importance_reason: Option<String>,
 }
 
 /// 事件的过滤条件。所有字段都是可选的，空 = 不过滤。
@@ -136,7 +140,8 @@ pub fn events(db: &Db, f: &EventFilter, p: Page) -> Result<Paged<EventItem>> {
 
         let mut list_sql = format!(
             "SELECT id, at_ms, kind, channel, summary, importance, scope,
-                    person_id, channel_day, dedup_key
+                    person_id, channel_day, dedup_key,
+                    importance_source, importance_reason
              FROM event {where_sql} ORDER BY at_ms DESC LIMIT ? OFFSET ?"
         );
         let mut all: Vec<Box<dyn rusqlite::ToSql>> = args;
@@ -160,6 +165,8 @@ pub fn events(db: &Db, f: &EventFilter, p: Page) -> Result<Paged<EventItem>> {
                         person_id: r.get(7)?,
                         channel_day: r.get(8)?,
                         dedup_key: r.get(9)?,
+                        importance_source: r.get(10)?,
+                        importance_reason: r.get(11)?,
                     })
                 },
             )?
@@ -797,6 +804,64 @@ pub fn person_ignored(db: &Db, person_id: &str) -> Result<bool> {
             )
             .unwrap_or(0);
         Ok(n != 0)
+    })
+}
+
+/// 某人与它的亲密度（没有关系记录时返回 None）。
+pub fn closeness_of(db: &Db, person_id: &str) -> Result<Option<i64>> {
+    db.with_read(|c| {
+        let v: Option<i64> = c
+            .query_row(
+                "SELECT closeness FROM relation WHERE person_id = ?1",
+                rusqlite::params![person_id],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(v)
+    })
+}
+
+/// 摘要命中了多少条既有事实（key 或 value 里出现摘要中的片段）。
+///
+/// 口径刻意松：只要事实里出现了摘要里的**任意一个 2 字片段**就算命中。
+/// 目的是回答「这条事件在补充/推翻已知的什么吗」，不是精确匹配 ——
+/// 精确匹配交给检索（BM25），这里只要一个「相关度信号」。
+pub fn fact_hits_for(db: &Db, summary: &str) -> Result<usize> {
+    let s = summary.trim();
+    if s.chars().count() < 2 {
+        return Ok(0);
+    }
+    // 长句逐窗全查太慢：取前 120 字，按 2 字滑窗抽样，最多 24 个探针。
+    let head: String = s.chars().take(120).collect();
+    let chars: Vec<char> = head
+        .chars()
+        .filter(|c| c.is_alphanumeric() || ('\u{4e00}'..='\u{9fff}').contains(c))
+        .collect();
+    if chars.len() < 2 {
+        return Ok(0);
+    }
+    let mut probes: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i + 1 < chars.len() && probes.len() < 24 {
+        probes.push(chars[i..i + 2].iter().collect());
+        i += 2;
+    }
+    db.with_read(|c| {
+        let mut n = 0usize;
+        for p in &probes {
+            let like = format!("%{p}%");
+            let hit: i64 = c.query_row(
+                "SELECT COUNT(*) FROM fact
+                 WHERE deleted_by IS NULL AND superseded_by IS NULL
+                   AND (key LIKE ?1 OR value LIKE ?1)",
+                rusqlite::params![like],
+                |r| r.get(0),
+            )?;
+            if hit > 0 {
+                n += 1;
+            }
+        }
+        Ok(n.min(3))
     })
 }
 

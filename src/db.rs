@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 /// 数据库句柄。
 ///
@@ -261,6 +261,13 @@ impl Db {
             // 忽视是「要不要处理这个人」（开关），两个维度，混在一起会让
             // 「陌生但不想理」和「亲近但拉黑」都表达不出来。
             add_column_if_missing(tx, "person", "ignored", "INTEGER NOT NULL DEFAULT 0")?;
+            // 重要度是「谁定的」：`auto` = 中枢自动判定，`caller` = 调用方传的，
+            // `manual` = 人后来在面板上改的。不记这个的话，
+            // 「为什么这条 0.3 那条 0.75」永远说不清。
+            add_column_if_missing(tx, "event", "importance_source", "TEXT")?;
+            // 自动判定的依据（「类型 died → 基底 0.78；关系 80 → +0.16」），
+            // 面板上直接显示，不用二次推算。
+            add_column_if_missing(tx, "event", "importance_reason", "TEXT")?;
 
             // ---------------------------------------------------------- 结构迁移 v7
             //

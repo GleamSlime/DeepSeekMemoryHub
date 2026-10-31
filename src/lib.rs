@@ -20,6 +20,7 @@ pub mod context;
 pub mod db;
 pub mod error;
 pub mod http;
+pub mod importance;
 pub mod kb;
 pub mod legacy_api;
 pub mod migrate;

@@ -3344,3 +3344,151 @@ async fn 事件归一不做全渠道匹配() {
         .unwrap();
     assert_eq!(summary, "姆姆 进服了");
 }
+
+// ================================================================== 重要度自动判定
+
+#[tokio::test]
+async fn 不传重要度时中枢自动判定并记录依据() {
+    let s = TestServer::start().await;
+
+    // 死亡 vs 闲聊：同一渠道、同一人，只有类型不同
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({"channel":"mc","kind":"died","summary":"被苦力怕炸死了"}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let died: serde_json::Value = s.get("/v1/event/list?size=1").await.json().await.unwrap();
+    let died_imp = died[0]["importance"].as_f64().unwrap();
+
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({"channel":"qq","kind":"group.said","summary":"今天天气不错"}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let chat: serde_json::Value = s.get("/v1/event/list?size=1").await.json().await.unwrap();
+    let chat_imp = chat[0]["importance"].as_f64().unwrap();
+
+    assert!(
+        died_imp > chat_imp + 0.3,
+        "死亡应显著高于闲聊：{died_imp} vs {chat_imp}"
+    );
+    assert_eq!(chat[0]["importance_source"], "auto");
+    let reason = chat[0]["importance_reason"].as_str().unwrap();
+    assert!(reason.contains("基底"), "要能说清依据：{reason}");
+}
+
+#[tokio::test]
+async fn 调用方给了重要度就尊重它() {
+    let s = TestServer::start().await;
+    let r = s
+        .post(
+            "/v1/event",
+            serde_json::json!({"channel":"mc","kind":"died","summary":"死了","importance":0.12}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = s.get("/v1/event/list?size=1").await.json().await.unwrap();
+    assert_eq!(j[0]["importance"], 0.12);
+    assert_eq!(j[0]["importance_source"], "caller");
+    assert!(
+        j[0]["importance_reason"].is_null(),
+        "调用方给的没有自动依据"
+    );
+}
+
+#[tokio::test]
+async fn 关系越好事件越重要() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms)
+             VALUES ('near','亲近的人','confirmed',1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms)
+             VALUES ('far','陌生人','confirmed',2)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO relation(person_id, familiarity, trust, closeness,
+                                  first_met_ms, last_met_ms)
+             VALUES ('near', 50, 50, 95, 1, 1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO relation(person_id, familiarity, trust, closeness,
+                                  first_met_ms, last_met_ms)
+             VALUES ('far', 0, 0, 0, 1, 1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    for (pid, summary) in [("near", "亲近的人跟我说话"), ("far", "陌生人跟我说话")] {
+        s.post(
+            "/v1/event",
+            serde_json::json!({
+                "channel":"mc","kind":"player.talked","summary":summary,"person_id":pid
+            }),
+        )
+        .await;
+    }
+
+    let j: serde_json::Value = s.get("/v1/event/list?size=10").await.json().await.unwrap();
+    let near = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["summary"] == "亲近的人跟我说话")
+        .unwrap();
+    let far = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["summary"] == "陌生人跟我说话")
+        .unwrap();
+    assert!(
+        near["importance"].as_f64().unwrap() > far["importance"].as_f64().unwrap(),
+        "亲近的人做的事该更重要：{near} vs {far}"
+    );
+    assert!(
+        near["importance_reason"].as_str().unwrap().contains("关系"),
+        "依据里要写明关系加分"
+    );
+}
+
+#[tokio::test]
+async fn 人工改过重要度会标成_manual() {
+    let s = TestServer::start().await;
+    s.post(
+        "/v1/event",
+        serde_json::json!({"channel":"mc","kind":"died","summary":"死了"}),
+    )
+    .await;
+    let j: serde_json::Value = s.get("/v1/event/list?size=1").await.json().await.unwrap();
+    let id = j[0]["id"].as_i64().unwrap();
+    assert_eq!(j[0]["importance_source"], "auto");
+
+    let r = TestServer::client()
+        .patch(format!("{}/v1/event/{id}", s.base))
+        .header("x-api-token", TOKEN)
+        .json(&serde_json::json!({"importance": 0.2}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let j: serde_json::Value = s.get("/v1/event/list?size=1").await.json().await.unwrap();
+    assert_eq!(j[0]["importance"], 0.2);
+    assert_eq!(j[0]["importance_source"], "manual");
+    assert!(
+        j[0]["importance_reason"].is_null(),
+        "人工改过之后自动依据要清掉，不然显示自相矛盾"
+    );
+}

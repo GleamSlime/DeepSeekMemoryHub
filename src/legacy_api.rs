@@ -253,10 +253,11 @@ async fn post_promise(
     let db = st.db.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         db.with_write(|tx| {
+            // 8 列 = 8 个占位符（多写一个 `?9` 会 503「9 values for 8 columns」）。
             tx.execute(
                 "INSERT INTO promise(id, person_id, description, status,
                                      created_ms, due_ms, updated_ms, blocked_reason)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
                  ON CONFLICT(id) DO UPDATE SET
                    description=excluded.description, status=excluded.status,
                    due_ms=excluded.due_ms, updated_ms=excluded.updated_ms,
@@ -348,17 +349,22 @@ async fn list_promises(
             ))?;
             let v = stmt
                 .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+                    // 索引必须与 SELECT 的 10 列一一对应（从 0 起）。
+                    // 这里曾经整体偏 1 且多了第 10 个 get：读出来的每个字段
+                    // 都是**后一列**的值 —— status 拿到 updated_ms、description
+                    // 拿到 status，而且最后一列会越界。线上表现为「列表里
+                    // 承诺内容是数字、状态永远不对」。
                     Ok(PromiseDto {
                         id: r.get(0)?,
-                        person_id: r.get(2)?,
-                        description: r.get(3)?,
-                        status: r.get(4)?,
-                        created_ms: r.get(5)?,
-                        due_ms: r.get(6)?,
-                        updated_ms: r.get(7)?,
-                        blocked_reason: r.get(8)?,
-                        goal_ref: r.get(9)?,
-                        job_ref: r.get(10)?,
+                        person_id: r.get(1)?,
+                        description: r.get(2)?,
+                        status: r.get(3)?,
+                        created_ms: r.get(4)?,
+                        due_ms: r.get(5)?,
+                        updated_ms: r.get(6)?,
+                        blocked_reason: r.get(7)?,
+                        goal_ref: r.get(8)?,
+                        job_ref: r.get(9)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -485,14 +491,19 @@ async fn list_affect(
             ))?;
             let v = stmt
                 .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+                    // 索引从 0 起，与 SELECT 的列顺序一一对应。
+                    // 这里曾经整体偏 1：把 at_ms 读成 person_id，于是 `at_ms` 那一列
+                    // 拿到的是 INTEGER 型的 at_ms 却按 TEXT 解析 → 503
+                    // 「Invalid column type Integer at index: 1」。
+                    // 线上实测：/v1/affect/list 一直 503，调用方只能看到「存储不可用」。
                     Ok(AffectLogDto {
-                        person_id: r.get(1)?,
-                        at_ms: r.get(2)?,
-                        kind: r.get(3)?,
-                        field: r.get(4)?,
-                        delta: r.get(5)?,
-                        reason: r.get(6)?,
-                        event_id: r.get(7)?,
+                        person_id: r.get(0)?,
+                        at_ms: r.get(1)?,
+                        kind: r.get(2)?,
+                        field: r.get(3)?,
+                        delta: r.get(4)?,
+                        reason: r.get(5)?,
+                        event_id: r.get(6)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -657,9 +668,12 @@ async fn put_self(
                  WHERE superseded_ms IS NULL AND deleted_by IS NULL",
                 rusqlite::params![s.created_ms],
             )?;
+            // 4 列 = 4 个占位符。这里曾经写成 5 个 `?` 只给 4 个值，
+            // 于是每次写自我认知都 503「5 values for 4 columns」——
+            // 线上实测：/v1/self 从上线起就没成功过。
             tx.execute(
                 "INSERT INTO self_narrative(body, model, created_ms, superseded_ms)
-                 VALUES (?1,?2,?3,?4,?5)",
+                 VALUES (?1,?2,?3,?4)",
                 rusqlite::params![s.body, s.model, s.created_ms, s.superseded_ms],
             )?;
             Ok(())

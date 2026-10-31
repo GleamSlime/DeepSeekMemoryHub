@@ -2880,3 +2880,115 @@ async fn 要它念日记时给全文() {
         "全文都在，不是只给开头：{text}"
     );
 }
+
+// ================================================================== 旧接口的列/占位符对齐
+
+#[tokio::test]
+async fn 自我认知能写入且读回最新一版() {
+    // 这里曾经把 INSERT 的占位符写成 5 个、只给 4 个值 →
+    // 每次写都 503「5 values for 4 columns」，线上从上线起就没成功过。
+    let s = TestServer::start().await;
+    let r = s
+        .post(
+            "/v1/self",
+            serde_json::json!({"body":"我是谁 v1","created_ms":1000}),
+        )
+        .await;
+    assert_eq!(r.status(), 200, "写自我认知应成功");
+
+    let r = s
+        .post(
+            "/v1/self",
+            serde_json::json!({"body":"我是谁 v2","created_ms":2000}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+
+    let j: serde_json::Value = s.get("/v1/self/get").await.json().await.unwrap();
+    assert_eq!(j["body"], "我是谁 v2", "读到的是最新一版：{j}");
+}
+
+#[tokio::test]
+async fn 承诺能写入且可改状态() {
+    // 同样的问题：INSERT 写了 9 个占位符但只有 8 列。
+    let s = TestServer::start().await;
+    let r = s
+        .post(
+            "/v1/promise",
+            serde_json::json!({
+                "id":"p1","description":"明天帮你修屋顶","status":"open",
+                "created_ms":1000,"updated_ms":1000
+            }),
+        )
+        .await;
+    assert_eq!(r.status(), 200, "写承诺应成功");
+
+    let r = TestServer::client()
+        .patch(format!("{}/v1/promise/p1", s.base))
+        .header("x-api-token", TOKEN)
+        .json(&serde_json::json!({"status":"kept"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // 这个接口返回的是**数组**（不是 {items:[]}）—— 与 /v1/relation/list 一致。
+    let j: serde_json::Value = s.get("/v1/promise/list").await.json().await.unwrap();
+    assert_eq!(j[0]["status"], "kept", "实际：{j}");
+    assert_eq!(j[0]["description"], "明天帮你修屋顶");
+}
+
+#[tokio::test]
+async fn 情绪流水能列出来() {
+    // 这里曾经整列错位（r.get(1..7) 读 7 列），at_ms 被按 TEXT 解析 →
+    // 一直 503「Invalid column type Integer at index: 1」。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO affect_log(person_id, at_ms, kind, field, delta, reason)
+             VALUES ('p1', 1000, 'mood', 'valence', 0.2, '一起干了活')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let r = s.get("/v1/affect/list").await;
+    assert_eq!(
+        r.status(),
+        200,
+        "情绪流水应能读：{}",
+        r.text().await.unwrap()
+    );
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j[0]["at_ms"], 1000);
+    assert_eq!(j[0]["kind"], "mood");
+    assert_eq!(j[0]["reason"], "一起干了活");
+}
+
+#[tokio::test]
+async fn 注入回放按条目数组写入() {
+    let s = TestServer::start().await;
+    let r = s
+        .post(
+            "/v1/injection-replay",
+            serde_json::json!({"entries":[{
+                "at_ms":1000,"lane":"qq-group","query":"在吗",
+                "chars":120,"injected":true,"replay":"plan: 已注入"
+            }]}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["inserted"], 1);
+
+    // 同一毫秒重放：幂等，不翻倍
+    let r = s
+        .post(
+            "/v1/injection-replay",
+            serde_json::json!({"entries":[{"at_ms":1000,"replay":"dup"}]}),
+        )
+        .await;
+    let j: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(j["inserted"], 0, "同毫秒应判重");
+}

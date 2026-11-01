@@ -457,6 +457,40 @@ pub fn render_images(rows: &[(Option<String>, Option<String>)]) -> Option<String
     )
 }
 
+/// 「记忆画面」段（**内联 base64**）：匹配到就把图直接给模型看。
+///
+/// 用户在 2026-11-01 定的口径：
+/// - 拿**最近几条消息**（不只是当前这句）去匹配关键词；
+/// - 匹配到就**把图本身**放进上下文（多模态模型真能看到），
+///   而不是只说「有这么一张图」。
+///
+/// 代价是 token：一张 800px 的图约 1–2k token，所以调用方要限制张数
+/// （默认最多 1 张、单张 ≤ 阈值的才内联，超了退化成「只给描述」）。
+///
+/// 格式用 markdown 图片：`![描述](data:image/png;base64,…)`。
+/// 这也是各家常见的多模态输入约定，接入了视觉模型就能直接读。
+pub fn render_images_inline(rows: &[(String, Option<String>, String)]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for (data_url, caption, keywords) in rows {
+        if data_url.is_empty() {
+            continue;
+        }
+        let cap = caption.as_deref().unwrap_or("").trim();
+        let label = if cap.is_empty() { keywords.trim() } else { cap };
+        let label = if label.is_empty() { "图片" } else { label };
+        // 描述里可能有 `]`，会破坏 markdown 链接语法 —— 换掉
+        let safe = label.replace(['[', ']', '('], " ");
+        lines.push(format!("- ![{safe}]({data_url})"));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "# 你记得的画面\n下面是你说过/见过的图，你能直接看到它们：\n{}",
+        lines.join("\n")
+    ))
+}
+
 /// 同上，但**带上图片 id**，让接入方能在需要时把图真的发出去。
 ///
 /// 为什么不给 URL：模型看不到图，给链接它只会瞎编「我看到了」。

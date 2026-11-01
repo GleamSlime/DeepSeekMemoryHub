@@ -142,6 +142,20 @@ pub struct Config {
     /// 快照保留天数。默认 30。
     pub snapshot_keep_days: i64,
 
+    /// `/v1/context` 里最多内联几张记忆画面（base64）。默认 1。
+    ///
+    /// 为什么默认只 1 张：一张 800px 的图约 1–2k token，塞多了
+    /// 会把「最近说过的话」这些更重要的段挤掉，成本也涨得快。
+    #[serde(default = "one")]
+    pub context_image_inline_max: usize,
+
+    /// 单张图超过多少字节就不内联（退化成只给描述）。默认 512 KB。
+    ///
+    /// 不设上限的话，一张 3 MB 的截图会被编码成 4 MB 的 base64 ——
+    /// 既吃 token 又可能超过模型的上下文上限，整轮请求直接失败。
+    #[serde(default = "k512")]
+    pub context_image_inline_max_bytes: i64,
+
     /// 每日自动快照的检查间隔（秒）。默认 3600。
     pub snapshot_check_seconds: u64,
 
@@ -170,6 +184,14 @@ pub struct Config {
     pub panel_password: String,
 }
 
+fn one() -> usize {
+    1
+}
+
+fn k512() -> i64 {
+    512 * 1024
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -179,6 +201,8 @@ impl Default for Config {
             data_dir: default_data_dir(),
             token: String::new(),
             snapshot_keep_days: 30,
+            context_image_inline_max: 1,
+            context_image_inline_max_bytes: 512 * 1024,
             snapshot_check_seconds: 3600,
             weight: WeightConfig::default(),
             max_body_bytes: 8 * 1024 * 1024,

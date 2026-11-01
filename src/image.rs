@@ -301,6 +301,74 @@ pub fn list(db: &crate::db::Db, q: Option<&str>, limit: usize) -> Result<Vec<Ima
     })
 }
 
+/// 最近 `n` 条消息（群 + 私聊都算）拼成一段文本，供关键词匹配。
+///
+/// 为什么看「最近几条」而不是只看着这句：群里的对话常常是
+/// 「图 → 哈哈这啥 → 你说呢」这种接力，只看当前这句会漏掉图。
+/// 用户 2026-11-01 明确要求看最近三条。
+pub fn recent_text(db: &crate::db::Db, scene: crate::context::Scene, n: usize) -> Result<String> {
+    let n = n.clamp(1, 20) as i64;
+    db.with_read(|c| {
+        let sql = match scene {
+            crate::context::Scene::Group => {
+                "SELECT content FROM channel_message
+                 WHERE deleted_by IS NULL AND channel = 'qq' AND group_id IS NOT NULL
+                   AND group_id <> ''
+                 ORDER BY at_ms DESC, id DESC LIMIT ?1"
+            }
+            crate::context::Scene::Private => {
+                "SELECT content FROM channel_message
+                 WHERE deleted_by IS NULL AND channel = 'qq'
+                   AND (group_id IS NULL OR group_id = '')
+                 ORDER BY at_ms DESC, id DESC LIMIT ?1"
+            }
+        };
+        let mut stmt = c.prepare(sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params![n], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.join("\n"))
+    })
+}
+
+/// 读原图并编码成 base64（data URL 形式）。读不到返回 `None`。
+///
+/// 为什么要塞 base64 进上下文：模型（多模态）真能看到图，
+/// 给 id 让它「假装看到」是错的；用户要的是「匹配到就直接给图」。
+/// 代价是 token —— 所以调用方必须限制张数与尺寸（见
+/// `[context] image_inline_max`）。
+pub fn to_data_url(dir: &std::path::Path, item: &ImageItem) -> Option<String> {
+    let path = resolve_file(dir, &item.file)?;
+    let bytes = std::fs::read(&path).ok()?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    Some(format!("data:{};base64,{}", mime(ext), b64(&bytes)))
+}
+
+/// 标准 base64 编码（带 `=` 补齐）。手写：只为两个调用点，不值得引 crate。
+pub fn b64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// 这个摘要是不是已经有一条有效记录了？是就返回它的 id。
 ///
 /// 去重是**入库前**的判断（而不是靠唯一索引报错再兜）：

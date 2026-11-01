@@ -322,6 +322,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/image/{id}/file", get(stream_image))
         .route("/v1/image/{id}/thumb", get(stream_image_thumb))
+        // 按关键词取图（表情包用）：给接入方一个「找张合适的图发出去」的入口。
+        .route("/v1/image/pick", get(pick_image))
         .route("/v1/snapshot", post(take_snapshot))
         .route("/v1/snapshot/list", get(list_snapshots))
         .route("/v1/rollback", post(do_rollback))
@@ -1957,6 +1959,10 @@ async fn get_context(
     // 放进闭包里不行：闭包是同步的，而且它跑在 blocking 线程池上，
     // 在那里 await 会把线程池的线程挂住。
     let kb_seg = load_kb_segment(&st, &needle).await;
+    // 记忆画面内联的两道闸（见 2.3 的注释）。
+    let img_dir = st.cfg.image_dir();
+    let img_max = st.cfg.context_image_inline_max;
+    let img_inline_max_bytes = st.cfg.context_image_inline_max_bytes;
 
     // 一次进 `spawn_blocking`：rusqlite 是同步的，且各段之间是**独立的读**，
     // 同一连接上顺序查完比跑 6 次 spawn 便宜得多。
@@ -2007,14 +2013,28 @@ async fn get_context(
             Err(e) => notes.push(format!("memory: 读取失败（{e}）")),
         }
 
-        // -------- 2.3 记忆画面（只在这段话提到某张图时出现）
+        // -------- 2.3 记忆画面
         //
-        // 与称呼对照同一套思路：只在被提到时才想起来。
-        // 把最近几十张图全塞进来既费 token，也会让它开始胡说「我看到你发的图」。
-        match crate::image::mentioned(&db, &needle, 3) {
+        // 口径（用户 2026-11-01 定）：
+        // **拿最近几条消息的关键词去匹配**（不只是当前这句 —— 群里常是
+        // 「图 → 哈哈这啥 → 你说呢」的接力，只看当前句会漏掉图），
+        // 匹配到就把**图本身以 base64 内联**进上下文，让多模态模型真能看到。
+        //
+        // 为什么内联而不是只给 id：模型看不到图时只会瞎编「我看到了」。
+        // 用户明确要「匹配到则直接增加 base64 的图片」。
+        //
+        // 代价是 token，所以有两道闸：张数（默认 1）与单张字节上限
+        // （超了退化成只给描述，不内联）。
+        match crate::image::recent_text(&db, scene, 3).and_then(|recent| {
+            let mut probe = needle.clone();
+            probe.push('\n');
+            probe.push_str(&recent.to_lowercase());
+            crate::image::mentioned(&db, &probe, img_max)
+        }) {
             Ok(rows) => {
-                // 进了上下文就算「被想起了一次」：面板上按回忆次数排序才有意义。
+                let mut inline: Vec<(String, Option<String>, String)> = Vec::new();
                 for img in &rows {
+                    // 进了上下文就算「被想起了一次」
                     let _ = db.with_write(|tx| {
                         tx.execute(
                             "UPDATE image SET recall_count = recall_count + 1,
@@ -2024,13 +2044,27 @@ async fn get_context(
                         )?;
                         Ok(())
                     });
+                    // 太大的不内联：一张 2MB 的图会吃掉几千 token，
+                    // 而且基座模型未必吃得下。退化成「只描述」。
+                    if img.bytes > img_inline_max_bytes {
+                        notes.push(format!(
+                            "images: {} 太大（{} 字节 > 上限）未内联，只给描述",
+                            img.id, img.bytes
+                        ));
+                        continue;
+                    }
+                    if let Some(url) = crate::image::to_data_url(&img_dir, img) {
+                        inline.push((
+                            url,
+                            img.caption.clone(),
+                            img.keywords.clone().unwrap_or_default(),
+                        ));
+                    } else {
+                        notes.push(format!("images: {} 原图读不到，未内联", img.id));
+                    }
                 }
-                let pairs: Vec<(Option<String>, Option<String>, Option<String>)> = rows
-                    .iter()
-                    .map(|i| (Some(i.id.clone()), i.caption.clone(), i.keywords.clone()))
-                    .collect();
                 push(
-                    crate::context::render_images_with_ids(&pairs),
+                    crate::context::render_images_inline(&inline),
                     crate::context::SEG_IMAGES,
                 );
             }
@@ -2961,6 +2995,79 @@ async fn list_image(
             .await
             .map_err(|e| Error::Storage(format!("图片列表失败：{e}")))??;
     Ok(Json(items))
+}
+
+#[derive(Deserialize)]
+struct PickQuery {
+    /// 关键词，逗号分隔。命中任一即可。
+    q: String,
+    /// 只要这个渠道的图（可选）。
+    channel: Option<String>,
+}
+
+/// 按关键词挑一张图（**表情包场景**）。
+///
+/// 两种用法（用户 2026-11-01 说明）：
+/// 1. 接入方想发「记忆里那张图」→ 先 `/v1/image/pick` 拿到 id，再取 `/file`；
+/// 2. 收到群友表情包、想回一张类似的 → 用刚才那条消息的词来 pick。
+///
+/// 排序：**没发过 / 发得少**的优先（`recall_count` 升序），
+/// 同一张表情包反复发很怪；再按最近使用时间轮换。
+async fn pick_image(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<PickQuery>,
+) -> ApiResult<serde_json::Value> {
+    check_token(&st, &headers)?;
+    let words: Vec<String> =
+        q.q.split([',', '，', ' ', '、'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.chars().count() >= 2)
+            .collect();
+    if words.is_empty() {
+        return Err(Error::BadRequest("q 里至少要有一个 2 字以上的词".into()));
+    }
+    let db = st.db.clone();
+    let channel = q.channel.clone();
+    let hit = tokio::task::spawn_blocking(move || -> Result<Option<crate::image::ImageItem>> {
+        let all = crate::image::list(&db, None, 500)?;
+        let mut cands: Vec<crate::image::ImageItem> = all
+            .into_iter()
+            .filter(|img| {
+                if let Some(ch) = channel.as_deref() {
+                    if img.channel.as_deref() != Some(ch) {
+                        return false;
+                    }
+                }
+                let kw = img.keywords.clone().unwrap_or_default();
+                kw.split([',', '，', ' ', '、', ';', '；'])
+                    .map(str::trim)
+                    .any(|k| {
+                        k.chars().count() >= 2
+                            && words
+                                .iter()
+                                .any(|w| k == w || w.contains(k) || k.contains(w))
+                    })
+            })
+            .collect();
+        // 发得少的优先，再按上次使用时间早的优先（= 轮换）
+        cands.sort_by_key(|i| (i.recall_count, i.last_recall_ms.unwrap_or(0)));
+        Ok(cands.into_iter().next())
+    })
+    .await
+    .map_err(|e| Error::Storage(format!("挑图失败：{e}")))??;
+
+    Ok(Json(match hit {
+        Some(img) => serde_json::json!({
+            "ok": true, "found": true,
+            "id": img.id,
+            "caption": img.caption,
+            "keywords": img.keywords,
+            "file": format!("/v1/image/{}/file", img.id),
+            "recall_count": img.recall_count,
+        }),
+        None => serde_json::json!({ "ok": true, "found": false }),
+    }))
 }
 
 async fn get_image(

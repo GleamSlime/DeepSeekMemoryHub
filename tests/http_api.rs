@@ -4160,6 +4160,10 @@ async fn 没命中关键词时画面不该进上下文() {
         Ok(())
     })
     .unwrap();
+    // 内联要读原图，所以盘上必须有这个文件
+    let idir = s.state.cfg.image_dir();
+    std::fs::create_dir_all(&idir).unwrap();
+    std::fs::write(idir.join("i1.png"), tiny_png()).unwrap();
 
     // 命中关键词 → 出现（关键词都是双字，单字按规则不算命中）
     for q in ["你钓鱼了吗", "湖边那边怎么样", "去钓鱼吧"] {
@@ -4210,6 +4214,9 @@ async fn 单字关键词不算命中() {
         Ok(())
     })
     .unwrap();
+    let idir = s.state.cfg.image_dir();
+    std::fs::create_dir_all(&idir).unwrap();
+    std::fs::write(idir.join("i1.png"), tiny_png()).unwrap();
     let j: serde_json::Value = s.get("/v1/context?q=鱼好大啊").await.json().await.unwrap();
     assert!(
         !j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
@@ -4456,4 +4463,134 @@ async fn 被忽视的人发来的图不入库但消息照记() {
         )
         .await;
     assert_eq!(r.status(), 200, "消息接口不该 500");
+}
+
+// ================================================================== 画面内联与挑图
+
+#[tokio::test]
+async fn 匹配到就把图以_base64_内联进上下文() {
+    // 用户口径：匹配到则**直接把图放进上下文**（多模态模型真能看到），
+    // 不是只告诉它「有这么一张图」。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, caption, keywords, created_ms, updated_ms)
+             VALUES ('i1','i1.png',100,'湖边的鱼','钓鱼,湖边',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let idir = s.state.cfg.image_dir();
+    std::fs::create_dir_all(&idir).unwrap();
+    std::fs::write(idir.join("i1.png"), tiny_png()).unwrap();
+
+    let j: serde_json::Value = s.get("/v1/context?q=去钓鱼吗").await.json().await.unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(
+        text.contains("data:image/png;base64,"),
+        "要内联 base64：{text}"
+    );
+    assert!(
+        text.contains("!["),
+        "用 markdown 图片语法（各家多模态的通用约定）：{text}"
+    );
+    assert!(j["parts"].as_array().unwrap().iter().any(|p| p == "images"));
+}
+
+#[tokio::test]
+async fn 最近几条消息命中也能触发画面() {
+    // 群里常是「图 → 哈哈这啥 → 你说呢」的接力，只看当前这句会漏掉图。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, caption, keywords, created_ms, updated_ms)
+             VALUES ('i1','i1.png',100,'湖边的鱼','钓鱼,湖边',1,1)",
+            [],
+        )?;
+        // 最近三条里有「钓鱼」
+        for (i, content) in ["今天去钓鱼了", "怎么样", "还行吧"].iter().enumerate() {
+            tx.execute(
+                "INSERT INTO channel_message(channel, group_id, account, sender_name, content, at_ms)
+                 VALUES ('qq','g1','1','某人',?1,?2)",
+                rusqlite::params![content, 1000 + i as i64],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let idir = s.state.cfg.image_dir();
+    std::fs::create_dir_all(&idir).unwrap();
+    std::fs::write(idir.join("i1.png"), tiny_png()).unwrap();
+
+    // 当前这句「还行吧」自己不含关键词，但最近三条里含
+    let j: serde_json::Value = s
+        .get("/v1/context?q=你觉得呢&scene=group")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
+        "最近几条消息命中也要触发：{j}"
+    );
+}
+
+#[tokio::test]
+async fn 太大的图不内联只记原因() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        // bytes 超上限（默认 512KB）
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, caption, keywords, created_ms, updated_ms)
+             VALUES ('big','big.png',900000,'超大图','钓鱼',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let idir = s.state.cfg.image_dir();
+    std::fs::create_dir_all(&idir).unwrap();
+    std::fs::write(idir.join("big.png"), tiny_png()).unwrap();
+
+    let j: serde_json::Value = s.get("/v1/context?q=钓鱼").await.json().await.unwrap();
+    assert!(
+        !j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
+        "超上限不该内联"
+    );
+    let dropped = j["dropped"].to_string();
+    assert!(dropped.contains("太大"), "要说清为什么没给：{dropped}");
+}
+
+#[tokio::test]
+async fn 挑图接口按关键词返回一张() {
+    // 表情包场景：接入方用刚收到那条消息的词来 pick。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        for (id, kw, used) in [
+            ("i1", "开心,笑", 3),
+            ("i2", "开心,耶", 0),
+            ("i3", "难过,哭", 0),
+        ] {
+            tx.execute(
+                "INSERT INTO image(id, file, bytes, caption, keywords,
+                                   recall_count, created_ms, updated_ms)
+                 VALUES (?1, ?1||'.png', 100, '图', ?2, ?3, 1, 1)",
+                rusqlite::params![id, kw, used],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let j: serde_json::Value = s.get("/v1/image/pick?q=开心").await.json().await.unwrap();
+    assert_eq!(j["found"], true);
+    assert_eq!(j["id"], "i2", "该挑发得少的那张（轮换），实际：{j}");
+
+    let j: serde_json::Value = s.get("/v1/image/pick?q=不存在").await.json().await.unwrap();
+    assert_eq!(j["found"], false);
+
+    // 单字词不算
+    let r = s.get("/v1/image/pick?q=图").await;
+    assert_eq!(r.status(), 400, "单字关键词应被拒");
 }

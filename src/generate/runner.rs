@@ -296,6 +296,11 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
+/// 天数的逆运算：(年, 月, 日)。公开给 `collect::fmt_day` 用。
+pub fn civil_from_days_pub(z: i64) -> (i64, i64, i64) {
+    civil_from_days(z)
+}
+
 /// 天数的逆运算：(年, 月, 日)。
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
@@ -572,6 +577,37 @@ mod tests {
         let local = ms + off;
         let secs = local.div_euclid(1000).rem_euclid(86400);
         ((secs / 3600) as u32, ((secs % 3600) / 60) as u32)
+    }
+}
+
+/// 跨子模块的测试辅助（`collect` 也要建临时库）。
+#[cfg(test)]
+pub mod tests_support {
+    use std::sync::Arc;
+
+    use crate::db::Db;
+
+    pub struct Guard(std::path::PathBuf);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 建一个已迁移的临时库。
+    pub fn fresh_db() -> (Arc<Db>, Guard) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "hubtest-{}-{}-{}",
+            std::process::id(),
+            crate::db::now_ms(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(dir.join("t.db")).unwrap();
+        (db, Guard(dir))
     }
 }
 

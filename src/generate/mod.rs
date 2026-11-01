@@ -23,6 +23,10 @@
 //! 并显式允许它给出「没什么情绪波动」（`label: "平静"`）——
 //! 不能每次聊天都开心。
 
+pub mod collect;
+pub mod daily;
+pub mod exec;
+pub mod r#loop;
 pub mod runner;
 pub mod throttle;
 pub mod tick;

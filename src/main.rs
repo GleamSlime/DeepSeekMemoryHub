@@ -126,6 +126,18 @@ async fn serve() -> bluewhale_memory::Result<()> {
 
     spawn_daily_snapshot(db.clone(), cfg.clone());
 
+    // 生成任务后台循环（日记/周记 + 被动 tick）。
+    //
+    // 位置很关键：必须在 AppState 建好之后 —— 它要用那三个热配置锁
+    // （llm / gen_cfg / gen_state），面板一改就立刻作用于下一轮。
+    bluewhale_memory::generate::r#loop::spawn(
+        state.db.clone(),
+        state.cfg.clone(),
+        state.llm.clone(),
+        state.gen_cfg.clone(),
+        state.gen_state.clone(),
+    );
+
     // 知识库回填。embedder 为 None 时这个函数直接返回（不启任务）——
     // 没配嵌入服务的部署与加这个功能之前**完全一致**：不探测、不报错。
     bluewhale_memory::kb::backfill::spawn(

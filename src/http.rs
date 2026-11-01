@@ -50,6 +50,12 @@ pub struct AppState {
     pub weight: Arc<std::sync::RwLock<crate::weight::WeightConfig>>,
     /// 检索索引缓存。见 [`IndexCache`]。
     pub index: Arc<IndexCache>,
+    /// 生成任务的运行时状态（tick 节流器）。
+    pub gen_state: Arc<crate::generate::exec::TickState>,
+    /// LLM 配置。**与 `cfg.llm` 分开用锁**：面板改完立刻生效，不用重启。
+    pub llm: Arc<std::sync::RwLock<crate::llm::LlmConfig>>,
+    /// 生成配置（同样可热改）。
+    pub gen_cfg: Arc<std::sync::RwLock<crate::generate::GenConfig>>,
     /// 嵌入客户端。`None` = 知识库未启用或未配置嵌入服务。
     ///
     /// **不是硬依赖**：为 `None` 时知识库检索退回纯字面，
@@ -77,6 +83,10 @@ impl AppState {
             &cfg.panel_password,
             Some(db.clone()),
         ));
+        // LLM / 生成配置优先从 `data_dir/llm.json` 读（面板改过的），
+        // 没有就用配置文件里的。
+        let llm = load_llm(&cfg).unwrap_or_else(|| cfg.llm.clone());
+        let gen_cfg = load_gen_cfg(&cfg).unwrap_or_else(|| cfg.generate.clone());
         Ok(Self {
             db,
             cfg,
@@ -84,6 +94,9 @@ impl AppState {
             started_ms: now_ms(),
             weight: Arc::new(std::sync::RwLock::new(weight)),
             index: Arc::new(IndexCache::default()),
+            gen_state: Arc::new(crate::generate::exec::TickState::default()),
+            llm: Arc::new(std::sync::RwLock::new(llm)),
+            gen_cfg: Arc::new(std::sync::RwLock::new(gen_cfg)),
             embedder,
             auth,
         })
@@ -220,6 +233,65 @@ fn build_embedder(cfg: &Config) -> Option<Arc<crate::kb::embed::Embedder>> {
 }
 
 /// 权重配置文件路径。
+/// LLM 与生成配置的落盘位置。
+///
+/// 与 `weights.json` 同理：面板改的要能扛重启。
+/// **单独文件而不是写回主配置**：主配置是部署时定的（端口、数据目录），
+/// 混在一起会让「改个模型」变成「重写整个配置文件」，风险不对等。
+pub fn llm_path(cfg: &Config) -> std::path::PathBuf {
+    cfg.data_dir.join("llm.json")
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct LlmFile {
+    #[serde(default)]
+    llm: crate::llm::LlmConfig,
+    #[serde(default)]
+    generate: crate::generate::GenConfig,
+}
+
+fn load_llm(cfg: &Config) -> Option<crate::llm::LlmConfig> {
+    let text = std::fs::read_to_string(llm_path(cfg)).ok()?;
+    let f: LlmFile = serde_json::from_str(&text).ok()?;
+    Some(f.llm)
+}
+
+fn load_gen_cfg(cfg: &Config) -> Option<crate::generate::GenConfig> {
+    let text = std::fs::read_to_string(llm_path(cfg)).ok()?;
+    let f: LlmFile = serde_json::from_str(&text).ok()?;
+    Some(f.generate)
+}
+
+/// 保存 LLM + 生成配置。**先落盘再改内存**（同 `save_weights` 的理由）。
+pub fn save_llm(cfg: &Config, llm: &crate::llm::LlmConfig, gen: &crate::generate::GenConfig) {
+    let p = llm_path(cfg);
+    let f = LlmFile {
+        llm: llm.clone(),
+        generate: gen.clone(),
+    };
+    match serde_json::to_string_pretty(&f) {
+        Ok(text) => {
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp = p.with_extension("json.tmp");
+            if std::fs::write(&tmp, &text).is_ok() {
+                // 文件里有 api_key：**只给主人在读**（0600），
+                // 泄露 key 等于泄露钱包。
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                }
+                if let Err(e) = std::fs::rename(&tmp, &p) {
+                    tracing::warn!("LLM 配置落盘失败：{e}（内存已生效）");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("LLM 配置序列化失败：{e}"),
+    }
+}
+
 pub fn weights_path(cfg: &Config) -> std::path::PathBuf {
     cfg.data_dir.join("weights.json")
 }

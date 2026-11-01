@@ -60,6 +60,13 @@ pub fn router(state: AdminState) -> Router {
             "/api/admin/settings",
             get(api_settings).post(api_save_settings),
         )
+        .route("/api/admin/llm", get(api_get_llm).post(api_save_llm))
+        .route("/api/admin/llm/test", axum::routing::post(api_test_llm))
+        .route("/api/admin/generate/log", get(api_gen_log))
+        .route(
+            "/api/admin/generate/tick",
+            axum::routing::post(api_force_tick),
+        )
         .route("/api/admin/plans", get(api_plans))
         .route("/api/admin/plan/{id}", get(api_plan_detail))
         .route("/api/admin/timeline", get(api_timeline))
@@ -493,6 +500,236 @@ async fn api_injections(
         .await
         .map_err(|e| Error::Storage(format!("回放查询失败：{e}")))??;
     Ok(Json(serde_json::json!({ "items": items })))
+}
+
+// ================================================================== LLM 配置
+
+async fn api_get_llm(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let llm = st
+        .app
+        .llm
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    let gen = st
+        .app
+        .gen_cfg
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    Ok(Json(serde_json::json!({
+        "llm": llm.public_view(),
+        "generate": gen,
+    })))
+}
+
+#[derive(Deserialize)]
+struct LlmPatch {
+    base_url: Option<String>,
+    /// 只在**非空**时覆盖：面板不回传明文 key，留空表示「不改」。
+    api_key: Option<String>,
+    model: Option<String>,
+    timeout_seconds: Option<u64>,
+    max_tokens: Option<u32>,
+    temperature: Option<f64>,
+    retries: Option<u32>,
+    /// 生成任务配置（可选，一起提交省一次请求）。
+    generate: Option<crate::generate::GenConfig>,
+}
+
+async fn api_save_llm(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(p): Json<LlmPatch>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+
+    let mut llm = st
+        .app
+        .llm
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    if let Some(v) = p.base_url {
+        llm.base_url = v.trim().to_string();
+    }
+    // 空 key = 不改（面板不回传明文，留空是常态）
+    if let Some(v) = p.api_key.as_deref().map(str::trim) {
+        if !v.is_empty() {
+            llm.api_key = v.to_string();
+        }
+    }
+    if let Some(v) = p.model {
+        llm.model = v.trim().to_string();
+    }
+    if let Some(v) = p.timeout_seconds {
+        if !(5..=600).contains(&v) {
+            return Err(Error::BadRequest("timeout_seconds 要在 5..600".into()));
+        }
+        llm.timeout_seconds = v;
+    }
+    if let Some(v) = p.max_tokens {
+        if !(64..=8192).contains(&v) {
+            return Err(Error::BadRequest("max_tokens 要在 64..8192".into()));
+        }
+        llm.max_tokens = v;
+    }
+    if let Some(v) = p.temperature {
+        if !(0.0..=2.0).contains(&v) {
+            return Err(Error::BadRequest("temperature 要在 0..2".into()));
+        }
+        llm.temperature = v;
+    }
+    if let Some(v) = p.retries {
+        llm.retries = v.min(5);
+    }
+
+    let mut gen = st
+        .app
+        .gen_cfg
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    if let Some(g) = p.generate {
+        gen = g;
+    }
+    gen.validate()?;
+
+    // 先落盘再改内存（同权重那套理由：落盘失败不该变成「重启就丢」）
+    crate::http::save_llm(&st.app.cfg, &llm, &gen);
+    if let Ok(mut g) = st.app.llm.write() {
+        *g = llm.clone();
+    }
+    if let Ok(mut g) = st.app.gen_cfg.write() {
+        *g = gen.clone();
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "llm": llm.public_view(),
+        "generate": gen,
+    })))
+}
+
+/// 试一下 LLM 通不通。
+///
+/// 用户配完最想知道的是「能不能用」——等到第二天才发现 401 太晚了。
+/// 这个接口发一句最短的请求，把**原始错误**带回来（含 401/404 的区分）。
+async fn api_test_llm(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let llm = st
+        .app
+        .llm
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    if !llm.is_ready() {
+        return Err(Error::BadRequest(
+            "还没配齐：base_url / api_key / model 都要填".into(),
+        ));
+    }
+    let client = crate::llm::ChatClient::new(llm);
+    let t0 = std::time::Instant::now();
+    match client
+        .chat(&[crate::llm::ChatMessage::user("回复两个字：收到")])
+        .await
+    {
+        Ok(o) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "reply": o.text,
+            "elapsed_ms": t0.elapsed().as_millis() as i64,
+            "prompt_tokens": o.prompt_tokens,
+            "completion_tokens": o.completion_tokens,
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "elapsed_ms": t0.elapsed().as_millis() as i64,
+        }))),
+    }
+}
+
+#[derive(Deserialize)]
+struct GenLogQuery {
+    limit: Option<usize>,
+}
+
+async fn api_gen_log(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(q): Query<GenLogQuery>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let limit = q.limit.unwrap_or(50);
+    let (items, fails) = tokio::task::spawn_blocking(move || {
+        let items = crate::generate::runner::recent(&db, limit)?;
+        // 各类任务的连续失败数：面板用它在页头显示红点
+        let mut fails = serde_json::Map::new();
+        for p in [
+            crate::llm::Purpose::Tick,
+            crate::llm::Purpose::Diary,
+            crate::llm::Purpose::Weekly,
+        ] {
+            fails.insert(
+                p.as_str().to_string(),
+                serde_json::json!(crate::generate::runner::consecutive_failures(&db, p)),
+            );
+        }
+        Ok::<_, crate::error::Error>((items, fails))
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))?
+    .map_err(|e| Error::Storage(e.to_string()))?;
+
+    let st2 = st.app.gen_state.throttle.lock().map(|g| {
+        serde_json::json!({
+            "pending": g.pending(),
+            "last_run_ms": g.last_run_ms(),
+        })
+    });
+    Ok(Json(serde_json::json!({
+        "items": items,
+        "consecutive_failures": fails,
+        "tick_state": st2.unwrap_or(serde_json::Value::Null),
+    })))
+}
+
+/// 手动触发一次 tick（面板按钮）。调试与「刚改完配置想立刻看到效果」用。
+async fn api_force_tick(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let cfg = st.app.cfg.clone();
+    let llm = st
+        .app
+        .llm
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    let gen = st
+        .app
+        .gen_cfg
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    if !llm.is_ready() {
+        return Err(Error::BadRequest("LLM 还没配置，先在「模型」页填好".into()));
+    }
+    // 用当前的热配置造一份临时 Config（不动全局）
+    let mut c = (*cfg).clone();
+    c.llm = llm;
+    c.generate = gen;
+    let summary = crate::generate::exec::run_tick(&db, &c, &st.app.gen_state, true).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "result": summary })))
 }
 
 /// 当前的运行配置（只读部分 + 可改的权重）。

@@ -317,32 +317,28 @@ pub fn mentioned(db: &crate::db::Db, text: &str, limit: usize) -> Result<Vec<Ima
         if hay.trim().is_empty() {
             continue;
         }
-        // 命中规则：关键词逐个别地出现（≥2 字），或者 caption 里出现 2 字滑窗
+        // ---------------------------------------------------------- 命中规则
+        //
+        // **只有关键词命中才算**（keywords 字段，人工填的）。
+        //
+        // 为什么不再拿 caption 做 2 字滑窗匹配：实测误命中率极高 ——
+        // caption「今天我们一起去湖边钓鱼」会被
+        // 「今天天气不错」「我们走吧」「一起吃饭吗」全部命中，
+        // 因为它们共享 `今天`/`我们`/`一起` 这种毫无信息量的两字片段。
+        // 结果是几乎每句闲聊都会把这张图塞进上下文，既费 token
+        // 又会让模型开始编「我看到你说的那张图」。
+        //
+        // 关键词是**人明确指定的触发词**，语义清楚、可控；
+        // caption 只用来「让人/模型知道这张图是什么」，不参与匹配。
+        // 想让它能被某句话触发，就把那个词加进 keywords。
         let mut hit = false;
         if let Some(kw) = img.keywords.as_deref() {
-            for k in kw.split([',', '，', ' ', '、']).map(str::trim) {
+            for k in kw.split([',', '，', ' ', '、', ';', '；']).map(str::trim) {
+                // 单字关键词太容易误伤（「鱼」「湖」），要求 ≥2 字
                 if k.chars().count() >= 2 && t.contains(k) {
                     hit = true;
                     break;
                 }
-            }
-        }
-        if !hit && !img.caption.as_deref().unwrap_or("").trim().is_empty() {
-            let cap: Vec<char> = img
-                .caption
-                .as_deref()
-                .unwrap_or("")
-                .chars()
-                .filter(|c| c.is_alphanumeric() || ('\u{4e00}'..='\u{9fff}').contains(c))
-                .collect();
-            let mut i = 0;
-            while i + 1 < cap.len() {
-                let probe: String = cap[i..i + 2].iter().collect();
-                if t.contains(&probe) {
-                    hit = true;
-                    break;
-                }
-                i += 1;
             }
         }
         if hit {

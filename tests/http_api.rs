@@ -4149,3 +4149,77 @@ async fn 面板会话能直接取语音与图片字节() {
     assert_eq!(s.get("/v1/voice/v1/file").await.status(), 200);
     assert_eq!(s.get("/v1/image/i1/file").await.status(), 200);
 }
+
+#[tokio::test]
+async fn 没命中关键词时画面不该进上下文() {
+    // 回归：caption 曾经参与「2 字滑窗」匹配，于是
+    // caption「今天我们一起去湖边钓鱼」会被
+    // 「今天天气不错」「我们走吧」「一起吃饭吗」全部命中 ——
+    // 因为它们共享 今天/我们/一起 这种毫无信息量的两字片段。
+    // 结果几乎每句闲聊都会把图塞进上下文。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, caption, keywords, created_ms, updated_ms)
+             VALUES ('i1','i1.png',100,'今天我们一起去湖边钓鱼','钓鱼,湖边',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // 命中关键词 → 出现（关键词都是双字，单字按规则不算命中）
+    for q in ["你钓鱼了吗", "湖边那边怎么样", "去钓鱼吧"] {
+        let j: serde_json::Value = s
+            .get(&format!("/v1/context?q={q}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
+            "「{q}」含关键词，应命中：{j}"
+        );
+    }
+
+    // 只共享 caption 里的常见两字片段 → **不该出现**
+    for q in [
+        "今天天气不错",
+        "我们走吧",
+        "一起吃饭吗",
+        "这个不错",
+        "好饿啊",
+        "随便说说",
+    ] {
+        let j: serde_json::Value = s
+            .get(&format!("/v1/context?q={q}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            !j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
+            "「{q}」没命中关键词，不该出现画面：{j}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn 单字关键词不算命中() {
+    // 「鱼」「湖」这种单字太容易误伤（「鱼好大」「湖里」），要求 ≥2 字。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, caption, keywords, created_ms, updated_ms)
+             VALUES ('i1','i1.png',100,'一条鱼','鱼,湖',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let j: serde_json::Value = s.get("/v1/context?q=鱼好大啊").await.json().await.unwrap();
+    assert!(
+        !j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
+        "单字关键词不该触发：{j}"
+    );
+}

@@ -43,6 +43,22 @@ pub struct ImageItem {
     pub updated_ms: i64,
 }
 
+/// 内容摘要（sha256）。用于去重：同一张图被反复转发时只存一份。
+///
+/// 用内容哈希而不是文件大小/文件名：群里转发同一张图，
+/// 名字每次都不同、大小偶尔相同 —— 只有内容是稳定的。
+pub fn digest(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    let out = h.finalize();
+    let mut s = String::with_capacity(64);
+    for b in out {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// 按魔数判断图片类型。返回扩展名。
 ///
 /// 不信文件名：multipart 的 filename 是客户端写的，拿它定扩展名
@@ -282,6 +298,22 @@ pub fn list(db: &crate::db::Db, q: Option<&str>, limit: usize) -> Result<Vec<Ima
             .query_map(rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())), row_to_item)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(items)
+    })
+}
+
+/// 这个摘要是不是已经有一条有效记录了？是就返回它的 id。
+///
+/// 去重是**入库前**的判断（而不是靠唯一索引报错再兜）：
+/// 命中时调用方要返回「已存在」而不是 500，
+/// 而且**不该先把文件落盘再回滚** —— 那会留下孤儿文件。
+pub fn find_by_digest(db: &crate::db::Db, sha: &str) -> Result<Option<String>> {
+    db.with_read(|c| {
+        Ok(c.query_row(
+            "SELECT id FROM image WHERE sha256 = ?1 AND deleted_by IS NULL",
+            rusqlite::params![sha],
+            |r| r.get::<_, String>(0),
+        )
+        .ok())
     })
 }
 

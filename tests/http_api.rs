@@ -3181,7 +3181,10 @@ async fn 自定义渠道用默认可信度算权重() {
 }
 
 #[tokio::test]
-async fn 被忽视的人的事件不落库() {
+async fn 被忽视的人的事件照常入库() {
+    // 2026-11-01 口径：忽视 = 不回复、不处理，**不是**「当他没说过话」。
+    // 事件与消息都照记 —— 事后要能查「那段时间他做了什么」。
+    // 「不处理」落在别处：插件 stop_event（不调模型）+ 拒收他的图。
     let s = TestServer::start().await;
     s.db.with_write(|tx| {
         tx.execute(
@@ -3204,22 +3207,12 @@ async fn 被忽视的人的事件不落库() {
         .await;
     assert_eq!(r.status(), 200);
     let j: serde_json::Value = r.json().await.unwrap();
-    assert!(j["id"].is_null(), "被忽视的人的事件不该真的写进去：{j}");
+    assert!(!j["id"].is_null(), "被忽视的人的事件也照常入库：{j}");
 
     let n: i64 =
         s.db.with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get(0))?))
             .unwrap();
-    assert_eq!(n, 0);
-
-    // 没有 person_id 的事件（比如世界事件）不受影响
-    let r = s
-        .post(
-            "/v1/event",
-            serde_json::json!({"channel":"mc","kind":"rain","summary":"下雨了"}),
-        )
-        .await;
-    let j: serde_json::Value = r.json().await.unwrap();
-    assert!(!j["id"].is_null(), "无主事件照常写：{j}");
+    assert_eq!(n, 1, "要能事后查到");
 }
 
 #[tokio::test]
@@ -4222,4 +4215,245 @@ async fn 单字关键词不算命中() {
         !j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
         "单字关键词不该触发：{j}"
     );
+}
+
+// ================================================================== 记忆画面：去重与必填
+
+#[tokio::test]
+async fn 同一张图重复上传会去重() {
+    // 群里「这张图又被发了一遍」是常态。不去重的话图库会被同一张图灌满，
+    // 而且每次都是一份新文件。按**内容 sha256** 判，不按文件名/大小。
+    let s = TestServer::start().await;
+    let first = upload_png(&s, "同一张图", "去重,测试").await;
+    assert!(!first["duplicate"].as_bool().unwrap_or(false));
+    let id1 = first["id"].as_str().unwrap().to_string();
+
+    // 完全相同的字节再传一次
+    let second = upload_png(&s, "同一张图", "去重,测试").await;
+    assert_eq!(second["duplicate"], true, "第二次应判重复：{second}");
+    assert_eq!(second["id"], id1, "应返回同一条记录的 id");
+
+    let n: i64 =
+        s.db.with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM image", [], |r| r.get(0))?))
+            .unwrap();
+    assert_eq!(n, 1, "库里只该有一条");
+
+    // 删掉之后能重新上传（逻辑删除不占去重名额）
+    let r = TestServer::client()
+        .delete(format!("{}/v1/image/{id1}", s.base))
+        .header("x-api-token", TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let third = upload_png(&s, "同一张图", "去重,测试").await;
+    assert!(
+        !third["duplicate"].as_bool().unwrap_or(false),
+        "删掉之后同一张图应能重新入库：{third}"
+    );
+}
+
+#[tokio::test]
+async fn 没有描述和关键词的图会被拒() {
+    // 用户要求：图片入库时 caption / keywords 必填。
+    // 不填的话它命中不了任何句子，只是图库、白占空间。
+    let s = TestServer::start().await;
+    let png = tiny_png();
+    let boundary = "----empty";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\n",
+    );
+    body.extend_from_slice(&png);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let r = TestServer::client()
+        .post(format!("{}/v1/image", s.base))
+        .header("x-api-token", TOKEN)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "两者都空应拒掉");
+    let txt = r.text().await.unwrap();
+    assert!(txt.contains("至少填一个"), "错误要说清楚原因：{txt}");
+
+    // 只填单字关键词 → 也拒（单字不算命中，等于没填）
+    let boundary2 = "----short";
+    let mut b2 = Vec::new();
+    b2.extend_from_slice(format!("--{boundary2}\r\n").as_bytes());
+    b2.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\n",
+    );
+    b2.extend_from_slice(&png);
+    b2.extend_from_slice(format!("\r\n--{boundary2}\r\n").as_bytes());
+    b2.extend_from_slice(b"Content-Disposition: form-data; name=\"keywords\"\r\n\r\n");
+    b2.extend_from_slice("鱼".as_bytes());
+    b2.extend_from_slice(format!("\r\n--{boundary2}--\r\n").as_bytes());
+    let r = TestServer::client()
+        .post(format!("{}/v1/image", s.base))
+        .header("x-api-token", TOKEN)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary2}"),
+        )
+        .body(b2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "单字关键词应拒掉");
+}
+
+#[tokio::test]
+async fn 回滚会连语音和记忆画面一起忘掉() {
+    // 「回滚 = 忘掉某时刻之后的一切」必须包括新加的两张表，
+    // 否则语音和图还留着，就是假的回滚。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, caption, created_ms, updated_ms)
+             VALUES ('i1','i1.png',1,'旧图',1000,1000)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, caption, created_ms, updated_ms)
+             VALUES ('i2','i2.png',1,'新图',9000,9000)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO voice(id, file, bytes, speaker, created_ms, updated_ms)
+             VALUES ('v1','v1.m4a',1,'default',1000,1000)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO voice(id, file, bytes, speaker, created_ms, updated_ms)
+             VALUES ('v2','v2.m4a',1,'default',9000,9000)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let r = s
+        .post("/v1/rollback", serde_json::json!({"target_ms": 5000}))
+        .await;
+    assert_eq!(r.status(), 200, "回滚应成功");
+
+    let (images, voices): (i64, i64) =
+        s.db.with_read(|c| {
+            Ok((
+                c.query_row(
+                    "SELECT COUNT(*) FROM image WHERE deleted_by IS NULL",
+                    [],
+                    |r| r.get(0),
+                )?,
+                c.query_row(
+                    "SELECT COUNT(*) FROM voice WHERE deleted_by IS NULL",
+                    [],
+                    |r| r.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(images, 1, "5000 之后的那张图要忘掉");
+    assert_eq!(voices, 1, "5000 之后的那条语音要忘掉");
+
+    // 留下的必须是旧的那条
+    let cap: String =
+        s.db.with_read(|c| {
+            Ok(c.query_row(
+                "SELECT caption FROM image WHERE deleted_by IS NULL",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(cap, "旧图");
+}
+
+#[tokio::test]
+async fn 被忽视的人发来的图不入库但消息照记() {
+    // 用户口径：忽视 = 不回复、不处理，**不是**「当他没说过话」。
+    // 所以图片不进记忆画面（那会被检索出来、进上下文），
+    // 但 channel_message 照记（事后要能查那段他在群里说了什么）。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO person(person_id, display_name, status, created_ms, ignored)
+             VALUES ('p1','烦人精','confirmed',1,1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO person_account(channel, account, person_id, seen_name,
+                                        first_seen_ms, last_seen_ms)
+             VALUES ('qq','66666','p1','烦人精',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let png = tiny_png();
+    let boundary = "----ig";
+    let mut body = Vec::new();
+    for (k, v) in [
+        ("file", ""),
+        ("sender", "烦人精"),
+        ("keywords", "测试,忽略"),
+    ] {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        if k == "file" {
+            body.extend_from_slice(
+                b"Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n",
+            );
+            body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+            body.extend_from_slice(&png);
+        } else {
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{k}\"\r\n\r\n").as_bytes(),
+            );
+            body.extend_from_slice(v.as_bytes());
+        }
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    let r = TestServer::client()
+        .post(format!("{}/v1/image", s.base))
+        .header("x-api-token", TOKEN)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let st = r.status();
+    let txt = r.text().await.unwrap();
+    assert_eq!(st, 200, "不该报错，只是跳过：{txt}");
+    let j: serde_json::Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(j["ignored"], true, "要明确告诉调用方被跳过了：{j}");
+
+    let n: i64 =
+        s.db.with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM image", [], |r| r.get(0))?))
+            .unwrap();
+    assert_eq!(n, 0, "被忽视的人的图不该入库");
+
+    // 但消息照记
+    let r = s
+        .post(
+            "/v1/message",
+            serde_json::json!({
+                "channel":"qq","account":"66666","sender_name":"烦人精",
+                "content":"我说句话","at_ms":1000
+            }),
+        )
+        .await;
+    assert_eq!(r.status(), 200, "消息接口不该 500");
 }

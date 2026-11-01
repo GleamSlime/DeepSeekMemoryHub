@@ -449,24 +449,44 @@ pub fn render_kb(rows: &[(Option<String>, String)]) -> Option<String> {
 /// 输入 `(描述, 关键词)`。**不给 URL** —— 模型看不到图，
 /// 给了链接它只会瞎编「我看到了」。给的是「你记得有这么一张图，内容是什么」。
 pub fn render_images(rows: &[(Option<String>, Option<String>)]) -> Option<String> {
+    render_images_with_ids(
+        &rows
+            .iter()
+            .map(|(c, k)| (None, c.clone(), k.clone()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// 同上，但**带上图片 id**，让接入方能在需要时把图真的发出去。
+///
+/// 为什么不给 URL：模型看不到图，给链接它只会瞎编「我看到了」。
+/// 但**接入方**需要 id —— 它拿到 id 就能调 `/v1/image/{id}/file` 把图发到群里。
+/// 所以 id 给的是**接入方**，文案里明确写「你看不到图」是给**模型**的。
+pub fn render_images_with_ids(
+    rows: &[(Option<String>, Option<String>, Option<String>)],
+) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
-    for (caption, keywords) in rows {
+    for (id, caption, keywords) in rows {
         let cap = caption.as_deref().unwrap_or("").trim();
         let kw = keywords.as_deref().unwrap_or("").trim();
         if cap.is_empty() && kw.is_empty() {
             continue;
         }
+        let tag = id
+            .as_deref()
+            .map(|i| format!("〔{i}〕"))
+            .unwrap_or_default();
         match (cap.is_empty(), kw.is_empty()) {
-            (false, true) => lines.push(format!("- {cap}")),
-            (true, false) => lines.push(format!("- （一张图，关键词：{kw}）")),
-            _ => lines.push(format!("- {cap}（关键词：{kw}）")),
+            (false, true) => lines.push(format!("- {cap}{tag}")),
+            (true, false) => lines.push(format!("- （一张图，关键词：{kw}）{tag}")),
+            _ => lines.push(format!("- {cap}（关键词：{kw}）{tag}")),
         }
     }
     if lines.is_empty() {
         return None;
     }
     Some(format!(
-        "# 你记得的画面\n这些图你见过、记得内容，但现在看不到它们：\n{}",
+        "# 你记得的画面\n这些图你见过、记得内容，但现在看不到它们；\n         想给别人看的话，让接入方按〔〕里的编号把图发出去：\n{}",
         lines.join("\n")
     ))
 }

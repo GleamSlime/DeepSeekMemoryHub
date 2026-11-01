@@ -42,6 +42,10 @@ pub const ROLLBACK_TABLES: &[(&str, &str)] = &[
     ("promise", "updated_ms"),
     ("channel_message", "at_ms"),
     ("recall_log", "at_ms"),
+    // 语音与记忆画面也是记忆：回滚到某天之前，那之后录的语音、
+    // 收的图都该被忘掉。不包含它们的话「回滚 = 忘掉之后的一切」就是假的。
+    ("voice", "created_ms"),
+    ("image", "created_ms"),
 ];
 
 /// 一次回滚的结果。

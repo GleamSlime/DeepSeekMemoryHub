@@ -730,18 +730,15 @@ async fn post_event(
     if body.summary.trim().is_empty() {
         return Err(Error::BadRequest("summary 不能为空".into()));
     }
-    // 被忽视的人：整条丢弃。
-    // 为什么在写入侧也拦一次（而不只是回复侧）：接入方可能只接了「回复」那一路，
-    // 忘了在写记忆前调用。两头都拦，任何一个环节漏了都不会把他的话写进来。
-    if let Some(pid) = body.person_id.as_deref().filter(|s| !s.is_empty()) {
-        if crate::query::person_ignored(&st.db, pid)? {
-            tracing::info!("忽略：person {pid} 被设为忽视，事件未入库");
-            return Ok(Json(WriteResult {
-                id: None,
-                duplicate: false,
-            }));
-        }
-    }
+    // 被忽视的人：**照常入库**（与 `channel_message` 同一口径）。
+    //
+    // 2026-11-01 按用户口径改：忽视 = 不回复、不处理，
+    // 不是「当他没说过话」。所以这里原先是「整条丢弃」，现在不拦了 ——
+    // 事后要能查到他在那段时间里做过什么。
+    //
+    // 「不处理」落在两处：接入方在回复前 stop_event（不调模型），
+    // 以及 `/v1/image` 拒绝他发的图（图会被检索进上下文，那才算处理）。
+    let _ = body.person_id.as_deref().filter(|s| !s.is_empty());
     if let Some(v) = body.importance {
         if !(0.0..=1.0).contains(&v) {
             return Err(Error::BadRequest("importance 必须在 [0,1]".into()));
@@ -2028,12 +2025,12 @@ async fn get_context(
                         Ok(())
                     });
                 }
-                let pairs: Vec<(Option<String>, Option<String>)> = rows
+                let pairs: Vec<(Option<String>, Option<String>, Option<String>)> = rows
                     .iter()
-                    .map(|i| (i.caption.clone(), i.keywords.clone()))
+                    .map(|i| (Some(i.id.clone()), i.caption.clone(), i.keywords.clone()))
                     .collect();
                 push(
-                    crate::context::render_images(&pairs),
+                    crate::context::render_images_with_ids(&pairs),
                     crate::context::SEG_IMAGES,
                 );
             }
@@ -2760,6 +2757,108 @@ async fn upload_image(
         return Err(Error::BadRequest("图片是空的".into()));
     }
 
+    // ---------------------------------------------------------- 忽视拦截
+    //
+    // 被忽视的人发来的图**不该进记忆画面**（用户 2026-11-01 指出）。
+    // 但**消息照记** —— 忽视是「不回复、不处理」，不是「当他没说过话」：
+    // 事后要能查「那段时间他在群里发了什么」，所以 channel_message 不动。
+    if let Some(sn) = sender.as_deref().filter(|s| !s.trim().is_empty()) {
+        let ch = channel.clone().unwrap_or_else(|| "qq".to_string());
+        let db = st.db.clone();
+        let sn2 = sn.to_string();
+        let ch2 = ch.clone();
+        let ignored = tokio::task::spawn_blocking(move || -> Result<bool> {
+            db.with_read(|c| {
+                // 先按「渠道账号」找（最准），找不到再按「最近观测到的名字」兜底。
+                let by_acct: i64 = c
+                    .query_row(
+                        "SELECT COALESCE(p.ignored, 0) FROM person_account pa
+                         JOIN person p ON p.person_id = pa.person_id
+                         WHERE pa.channel = ?1 AND (pa.account = ?2 OR pa.seen_name = ?2)
+                         LIMIT 1",
+                        rusqlite::params![ch2, sn2],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if by_acct != 0 {
+                    return Ok(true);
+                }
+                // 按显示名/场景称呼找
+                let n: i64 = c
+                    .query_row(
+                        "SELECT COUNT(*) FROM person p
+                         WHERE p.ignored = 1
+                           AND (p.display_name = ?1
+                                OR EXISTS (SELECT 1 FROM person_scene s
+                                           WHERE s.person_id = p.person_id AND s.name = ?1))",
+                        rusqlite::params![sn2],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                Ok(n > 0)
+            })
+        })
+        .await
+        .map_err(|e| Error::Storage(format!("忽视检查失败：{e}")))??;
+        if ignored {
+            tracing::info!("忽视：{sn} 发来的图不入记忆画面（消息仍照记）");
+            return Ok(Json(serde_json::json!({
+                "ok": true,
+                "ignored": true,
+                "skipped": true,
+            })));
+        }
+    }
+
+    // ---------------------------------------------------------- 必填校验
+    //
+    // 没有 caption 也没有 keywords 的图，命中不了任何句子 —— 它只是**图库**，
+    // 不是记忆（用户 2026-11-01：「实际都没有描述/关键词，就成了图库功能」）。
+    // 所以两者至少填一个；只填关键词时，至少要有一个 ≥2 字的词。
+    let cap = caption.as_deref().unwrap_or("").trim().to_string();
+    let kw = keywords.as_deref().unwrap_or("").trim().to_string();
+    if cap.is_empty() && kw.is_empty() {
+        return Err(Error::BadRequest(
+            "caption 或 keywords 至少填一个 —— 否则这张图永远想不起来，只是占地方".into(),
+        ));
+    }
+    if cap.is_empty() {
+        let usable = kw
+            .split([',', '，', ' ', '、', ';', '；'])
+            .map(str::trim)
+            .any(|k| k.chars().count() >= 2);
+        if !usable {
+            return Err(Error::BadRequest(
+                "keywords 里至少要有一个 2 字以上的词（单字太容易误伤，不算命中）".into(),
+            ));
+        }
+    }
+    caption = if cap.is_empty() { None } else { Some(cap) };
+    keywords = if kw.is_empty() { None } else { Some(kw) };
+
+    // ---------------------------------------------------------- 去重
+    //
+    // 先算哈希再决定要不要落盘：命中已有记录直接返回它，
+    // 既不重复占盘，也不会留下「写了一半」的文件。
+    // 群里「同一张图又被转了一遍」是常态，不去重的话图库很快被灌满。
+    let sha = crate::image::digest(&data);
+    {
+        let db = st.db.clone();
+        let sha2 = sha.clone();
+        let existing =
+            tokio::task::spawn_blocking(move || crate::image::find_by_digest(&db, &sha2))
+                .await
+                .map_err(|e| Error::Storage(format!("查重失败：{e}")))??;
+        if let Some(id) = existing {
+            tracing::info!("图片已存在（sha256 相同），跳过落盘：{id}");
+            return Ok(Json(serde_json::json!({
+                "ok": true,
+                "duplicate": true,
+                "id": id,
+            })));
+        }
+    }
+
     let id = format!("img-{}-{}", now_ms(), rand_suffix());
     let dir = st.cfg.image_dir();
     let id2 = id.clone();
@@ -2778,17 +2877,18 @@ async fn upload_image(
     let id3 = id.clone();
     let file_db = file.clone();
     let thumb_db = thumb.clone();
+    let sha_db = sha.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         db.with_write(|tx| {
             let now = now_ms();
             tx.execute(
                 "INSERT INTO image(id, file, thumb, width, height, bytes, caption,
                                    keywords, sender, channel, person_ids,
-                                   created_ms, updated_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
+                                   sha256, created_ms, updated_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)",
                 rusqlite::params![
                     id3, file_db, thumb_db, w, h, bytes, caption, keywords, sender, channel,
-                    person_ids, now
+                    person_ids, sha_db, now
                 ],
             )?;
             Ok(())

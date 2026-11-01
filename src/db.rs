@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 18;
+pub const SCHEMA_VERSION: i32 = 19;
 
 /// 数据库句柄。
 ///
@@ -268,6 +268,35 @@ impl Db {
             // 自动判定的依据（「类型 died → 基底 0.78；关系 80 → +0.16」），
             // 面板上直接显示，不用二次推算。
             add_column_if_missing(tx, "event", "importance_reason", "TEXT")?;
+            // 图片内容哈希（sha256）。同一张图被反复转发时不该存 N 份 ——
+            // 群里「图又被发了一遍」是常态，不去重的话图库会被同一张图灌满。
+            add_column_if_missing(tx, "image", "sha256", "TEXT")?;
+            // 逻辑删除列：回滚要把 image 也包含进来（原本没有这一列）。
+            add_column_if_missing(tx, "image", "deleted_by", "INTEGER")?;
+            // 语音同理：回滚要能「忘掉某天之后录的语音」。
+            add_column_if_missing(tx, "voice", "deleted_by", "INTEGER")?;
+            // 语音内容哈希：同一段文本合成的语音也可能被重复上传。
+            add_column_if_missing(tx, "voice", "sha256", "TEXT")?;
+
+            // ---------------------------------------------------------- 去重索引
+            //
+            // **必须放在 add_column 之后**：`SCHEMA_SQL` 是在 migrate 一开头
+            // 整段 `execute_batch` 的，那时老库还没有 `sha256` 列 ——
+            // 索引写在那里会直接报 `no such column: sha256`，**服务起不来**。
+            // 第一次上 schema 19 时线上就是这么挂的（实测）。
+            //
+            // 用 IF NOT EXISTS + 忽略错误：老库里可能已经存在重复数据，
+            // 建索引会失败 —— 那样宁可少一个索引也不要让服务起不来。
+            let _ = tx.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS image_digest
+                 ON image(sha256) WHERE sha256 IS NOT NULL AND deleted_by IS NULL",
+                [],
+            );
+            let _ = tx.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS voice_digest
+                 ON voice(sha256) WHERE sha256 IS NOT NULL AND deleted_by IS NULL",
+                [],
+            );
 
             // ---------------------------------------------------------- 结构迁移 v7
             //
@@ -468,6 +497,7 @@ CREATE TABLE IF NOT EXISTS voice (
   note        TEXT,
   -- 来源渠道 tag，与 event.channel 同一套
   channel     TEXT,
+  sha256      TEXT,
   created_ms  INTEGER NOT NULL,
   updated_ms  INTEGER NOT NULL,
   deleted_by  INTEGER
@@ -501,6 +531,8 @@ CREATE TABLE IF NOT EXISTS image (
   -- 被想起过多少次（进了上下文就 +1）
   recall_count INTEGER NOT NULL DEFAULT 0,
   last_recall_ms INTEGER,
+  -- 内容 sha256：同一张图重复发来只留一份（见 `image::digest`）
+  sha256       TEXT,
   created_ms  INTEGER NOT NULL,
   updated_ms  INTEGER NOT NULL,
   deleted_by  INTEGER

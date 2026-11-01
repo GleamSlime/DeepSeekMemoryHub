@@ -621,16 +621,15 @@ async fn post_message(
     Json(m): Json<MessageDto>,
 ) -> A<serde_json::Value> {
     crate::http::check_token(&st, &headers)?;
-    // 被忽视的人说的话：不入库。
-    // 判断按「渠道 + 账号」查 —— 对方手里只有 QQ 号，没有 person_id。
-    if let Some(acc) = m.account.as_deref().filter(|s| !s.trim().is_empty()) {
-        if crate::query::is_ignored(&st.db, &m.channel, acc)? {
-            tracing::info!("忽略：{}/{} 被设为忽视，消息未入库", m.channel, acc);
-            return Ok(Json(
-                serde_json::json!({"ok": true, "inserted": false, "ignored": true}),
-            ));
-        }
-    }
+    // 被忽视的人说的话：**照常入库**。
+    //
+    // 这里原先是「直接丢弃」，2026-11-01 按用户口径改回来：
+    // 忽视 = 不回复、不处理，**不是**「当他没说过话」。
+    // 事后要能查「那段时间他在群里发了什么」（排错、取证、判断要不要解除忽视），
+    // 丢掉就没法查了。
+    //
+    // 被拦的是另外两处：`on_group_sync` 里 stop_event（不回复），
+    // 和 `/v1/image` 上传时跳过（图会被检索进上下文，那才是「处理」）。
     let db = st.db.clone();
     // 空串 message_id 必须归一成 NULL：`channel_message` 上有
     // `UNIQUE(channel, message_id) WHERE message_id IS NOT NULL`，

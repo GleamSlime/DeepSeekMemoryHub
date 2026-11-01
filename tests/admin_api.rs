@@ -1317,7 +1317,7 @@ async fn 忽视开关能开能关并且影响写入() {
         .unwrap();
     assert_eq!(j["ignored"], true);
 
-    // 他的消息不该入库
+    // 他的消息**照常入库**（2026-11-01 口径：忽视不是「当他没说过话」）
     let r = S::client()
         .post(format!("{}/v1/message", s.base))
         .header("x-api-token", TOKEN)
@@ -1329,14 +1329,15 @@ async fn 忽视开关能开能关并且影响写入() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let j: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(j["inserted"], false, "被忽视的人的消息不该写进去：{j}");
-    assert_eq!(j["ignored"], true);
+    assert_eq!(j["inserted"], true, "消息要照记，事后才查得到：{j}");
 
     let n: i64 = s
         .db
         .with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM channel_message", [], |r| r.get(0))?))
         .unwrap();
-    assert_eq!(n, 0);
+    assert_eq!(n, 1);
+
+    // 「不处理」落在回复链路（插件 stop_event）与图片入库上，不在存储上
 }
 
 // ================================================================== 人格

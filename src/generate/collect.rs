@@ -470,12 +470,102 @@ pub fn write_mood(db: &Db, m: &crate::generate::tick::MoodOut) -> Result<()> {
     })
 }
 
+/// 最近 `window_ms` 内是不是已经有内容很相似的手帐了？
+///
+/// # 为什么需要
+///
+/// 实测（2026-11-01 并发测试）：同一批「20 条并发测试」被两次 tick 处理，
+/// 写出了两条手帐 —— 「完成 20 项并发测试（probe.concurrent 1–20）」和
+/// 「完成 20 次 probe.concurrent 并发测试」。**同一件事，措辞不同**。
+///
+/// 所以不能靠摘要哈希，得看**内容相似度**：去掉标点与空白后，
+/// 两个字符串的最长公共子序列占比过半就算重。
+/// 比编辑距离便宜，而且对这种「换个说法」的场景够用。
+pub fn is_duplicate_journal(db: &Db, summary: &str, window_ms: i64) -> Result<bool> {
+    let now = crate::db::now_ms();
+    let target = normalize_summary(summary);
+    if target.chars().count() < 4 {
+        return Ok(false);
+    }
+    db.with_read(|c| {
+        let mut stmt = c.prepare(
+            "SELECT summary FROM journal
+             WHERE deleted_by IS NULL AND at_ms > ?1
+             ORDER BY at_ms DESC LIMIT 40",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![now - window_ms], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for old in rows {
+            let o = normalize_summary(&old);
+            if o.is_empty() {
+                continue;
+            }
+            let common = lcs_len(&target, &o);
+            let shorter = target.chars().count().min(o.chars().count()).max(1);
+            if common as f64 / shorter as f64 >= 0.6 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
+/// 去掉标点、空白，只留实词，便于比相似度。
+fn normalize_summary(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            !c.is_ascii_punctuation()
+                && !c.is_whitespace()
+                && !matches!(
+                    c,
+                    '，' | '。' | '、' | '：' | '；' | '「' | '」' | '（' | '）' | '…'
+                )
+        })
+        .collect()
+}
+
+/// 最长公共子序列长度（按 char）。
+fn lcs_len(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            cur[j] = if a[i - 1] == b[j - 1] {
+                prev[j - 1] + 1
+            } else {
+                prev[j].max(cur[j - 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 /// 写一条手帐。
 pub fn write_journal(
     db: &Db,
     j: &crate::generate::tick::JournalOut,
     channel: &str,
 ) -> Result<String> {
+    // 同一件事写两遍是最难发现的数据污染：面板上像"记了两次"，
+    // 检索时又会把权重抬高。写入前查一次近 2 小时有没有说法差不多的。
+    //
+    // 实测来源（2026-11-01 并发测试）：同一批事件被两次 tick 处理，
+    // 写出「完成 20 项并发测试（probe.concurrent 1–20）」和
+    // 「完成 20 次 probe.concurrent 并发测试」—— **同一件事，措辞不同**，
+    // 所以不能靠摘要哈希，得比内容相似度。
+    if is_duplicate_journal(db, &j.summary, 2 * 3_600_000)? {
+        tracing::info!("手帐重复，跳过：{}", j.summary);
+        return Ok(String::new());
+    }
     let id = format!("j-{}-{}", crate::db::now_ms(), crate::http::rand_suffix());
     let now = crate::db::now_ms();
     db.with_write(|tx| {
@@ -856,6 +946,64 @@ mod tests {
             .unwrap();
         assert_eq!(s, "被苦力怕炸死");
         assert_eq!(src, "generated", "要能区分是中枢生成的");
+    }
+
+    #[test]
+    fn 同一件事换个说法不会记两条() {
+        // 实测来源：并发测试时同一批事件被处理两次，写出
+        // 「完成 20 项并发测试（probe.concurrent 1–20）」和
+        // 「完成 20 次 probe.concurrent 并发测试」—— 同一件事。
+        let (db, _g) = tmp_db();
+        let j1 = crate::generate::tick::JournalOut {
+            kind: "task_done".into(),
+            summary: "完成 20 项并发测试（probe.concurrent 1–20）".into(),
+            importance: 0.5,
+        };
+        assert!(
+            !write_journal(&db, &j1, "mc").unwrap().is_empty(),
+            "第一条要写进去"
+        );
+
+        let j2 = crate::generate::tick::JournalOut {
+            kind: "task_done".into(),
+            summary: "完成 20 次 probe.concurrent 并发测试".into(),
+            importance: 0.5,
+        };
+        assert!(
+            write_journal(&db, &j2, "mc").unwrap().is_empty(),
+            "同一件事换个说法不该再记一条"
+        );
+        let n: i64 = db
+            .with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM journal", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn 不同的事照样记() {
+        let (db, _g) = tmp_db();
+        for s in ["被苦力怕炸死了", "把房顶盖完了", "钓到三条鳕鱼"] {
+            let j = crate::generate::tick::JournalOut {
+                kind: "note".into(),
+                summary: s.into(),
+                importance: 0.5,
+            };
+            assert!(
+                !write_journal(&db, &j, "mc").unwrap().is_empty(),
+                "{s} 该写进去"
+            );
+        }
+        let n: i64 = db
+            .with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM journal", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(n, 3, "三件不同的事都该留");
+    }
+
+    #[test]
+    fn 相似度算法() {
+        assert_eq!(lcs_len("abc", "abc"), 3);
+        assert_eq!(lcs_len("abc", "xyz"), 0);
+        assert!(lcs_len("完成并发测试", "完成了并发测试") >= 4);
     }
 
     #[test]

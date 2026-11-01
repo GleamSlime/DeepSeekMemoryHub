@@ -15,15 +15,27 @@ use crate::generate::throttle::{Decision, Throttle};
 use crate::generate::tick;
 use crate::llm::Purpose;
 
-/// tick 的内存态（节流器）。
+/// tick 的内存态（节流器 + 互斥锁）。
 pub struct TickState {
     pub throttle: Mutex<Throttle>,
+    /// 同一时刻只允许一个 tick 在跑。
+    ///
+    /// 为什么需要：节流器管的是「两次之间隔多久」，而手动触发会绕过它 ——
+    /// 实测并行打 3 次 `/api/admin/generate/tick`，三个**全都真的调了模型**
+    /// （3 倍花费，而且它们读到同一批事件，写出了重复手帐）。
+    /// 「手动触发」的本意是「不用等节流」，不是「可以并发烧钱」。
+    ///
+    /// 用 `AtomicBool` 而不是 `Mutex<bool>`：`MutexGuard` 不是 `Send`，
+    /// 会让 `run_tick` 的 future 不能跨 await（实测编译不过）。
+    /// 这里要的只是「谁抢到谁跑」，原子交换就够。
+    pub running: std::sync::atomic::AtomicBool,
 }
 
 impl Default for TickState {
     fn default() -> Self {
         Self {
             throttle: Mutex::new(Throttle::default()),
+            running: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -37,6 +49,32 @@ pub async fn run_tick(
 ) -> Result<TickSummary> {
     let now = crate::db::now_ms();
     let g = &cfg.generate;
+
+    // ---- 0. 互斥：同一时刻只允许一个 tick
+    //
+    // 用 try_lock 而不是等锁：并发请求应该**立刻返回「正在跑」**，
+    // 而不是排队 —— 排队意味着用户连点 5 次就要等 5 轮，
+    // 而他真正想要的只是「现在跑一次」。
+    struct Release<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            // 无论正常返回还是提前 return / panic，都要把标志清掉，
+            // 否则一次异常就让 tick 永久卡在「已运行」。
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    if state
+        .running
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        tracing::info!("tick 已在运行，本次跳过");
+        return Ok(TickSummary {
+            ran: false,
+            why: "already_running".into(),
+            ..Default::default()
+        });
+    }
+    let _guard = Release(&state.running);
 
     // ---- 1. 该不该跑
     //
@@ -376,6 +414,44 @@ mod tests {
             1,
             "没有一点重要度事件的纯群聊也要能触发"
         );
+    }
+
+    /// 并发保护：同一时刻只允许一个 tick。
+    ///
+    /// 实测踩过：并行打 3 次手动触发，三个**全都真的调了模型**
+    /// （3 倍花费，且读到同一批事件写出重复手帐）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 并发只跑一次() {
+        let (db, _g) = crate::generate::runner::tests_support::fresh_db();
+        let cfg = cfg_with_llm();
+        // 必须有东西可处理，否则两个都会先撞 nothing_new，
+        // 根本走不到互斥那一步（第一次写这条测试就是这么误判的）
+        db.with_write(|tx| {
+            tx.execute(
+                "INSERT INTO event(at_ms, kind, channel, summary, importance, scope)
+                 VALUES (?1,'died','mc','被炸死',0.9,'companion')",
+                rusqlite::params![crate::db::now_ms()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let db2 = db.clone();
+        let cfg2 = cfg.clone();
+        // 用一个独立状态模拟「同一个进程里的两次并发」
+        let state = Arc::new(TickState::default());
+        let st2 = state.clone();
+        let h1 = tokio::spawn(async move { run_tick(&db2, &cfg2, &st2, true).await });
+        let db3 = db.clone();
+        let cfg3 = cfg.clone();
+        let st3 = state.clone();
+        let h2 = tokio::spawn(async move { run_tick(&db3, &cfg3, &st3, true).await });
+        let (r1, r2) = (h1.await.unwrap().unwrap(), h2.await.unwrap().unwrap());
+        // 一个真跑（会失败，因为 LLM 连不上），另一个应是 already_running
+        let skipped = [&r1, &r2]
+            .iter()
+            .filter(|r| r.why == "already_running")
+            .count();
+        assert!(skipped >= 1, "至少要有一个被互斥挡住：{r1:?} / {r2:?}");
     }
 
     /// 关掉 tick 就该完全不动。

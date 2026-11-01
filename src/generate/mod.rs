@@ -156,7 +156,7 @@ mod tests {
     fn 配置校验() {
         let mut c = GenConfig::default();
         assert!(c.validate().is_ok());
-        c.tick_batch = 0;
+        c.tick_batch = 0; // 下面逐项改，属于测同一份配置的多个约束
         assert!(c.validate().is_err(), "批量为 0 就永远攒不满");
         c.tick_batch = 8;
         c.tick_interval_seconds = 10;
@@ -168,9 +168,11 @@ mod tests {
 
     #[test]
     fn 空时间表示关闭且不报错() {
-        let mut c = GenConfig::default();
-        c.diary_at = String::new();
-        c.weekly_at = "  ".into();
+        let c = GenConfig {
+            diary_at: String::new(),
+            weekly_at: "  ".into(),
+            ..Default::default()
+        };
         assert!(c.validate().is_ok(), "空 = 关，不该拦住启动");
     }
 }

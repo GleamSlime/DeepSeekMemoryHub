@@ -77,7 +77,7 @@ pub enum SkipReason {
 }
 
 impl SkipReason {
-    pub fn as_str(self) -> str_ty {
+    pub fn as_str(self) -> &'static str {
         match self {
             SkipReason::TooSoon => "too_soon",
             SkipReason::NothingNew => "nothing_new",
@@ -85,8 +85,6 @@ impl SkipReason {
         }
     }
 }
-
-type str_ty = &'static str;
 
 impl Throttle {
     /// 记一条「够格」的新事件，返回当前攒了几条。

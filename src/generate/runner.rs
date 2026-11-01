@@ -378,7 +378,7 @@ mod tests {
     /// 建一个临时库（这些判据要真跑 SQL 的 localtime 与 gen_state）。
     fn tmp_db() -> (std::sync::Arc<Db>, tempdir::TempDirGuard) {
         let dir = tempdir::TempDirGuard::new();
-        let db = Db::open(&dir.path().join("t.db")).unwrap();
+        let db = Db::open(dir.path().join("t.db")).unwrap();
         (db, dir)
     }
 

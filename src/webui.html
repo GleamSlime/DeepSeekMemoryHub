@@ -2189,13 +2189,35 @@ async function renderTraits(c){
     每一次只挪一点点，所以它反映的是「长期处在这种相处里，它变成了什么样」。
   </p>
   <div class="cards">${d.items.map(t=>`
-    <div class="card" style="cursor:default">
+    <div class="card" style="cursor:pointer" data-trait="${esc(t.trait_)}">
       <div class="k">${esc(t.name || t.trait_)}${t.desc?` <span class="dim mono" style="font-size:10.5px">${esc(t.trait_)}</span>`:''}</div>
       <div class="v">${t.value.toFixed(2)}</div>
       <div class="m">${esc(t.word)} · ${fmtAgo(t.updated_ms)}</div>
       <div style="margin-top:9px">${impBar(t.value)}</div>
       ${t.desc?`<div class="dim" style="font-size:11.5px;margin-top:8px;line-height:1.6">${esc(t.desc)}</div>`:''}
     </div>`).join('')}</div>`;
+
+  // 点开看这是什么、删除。特质是经历沉淀出来的，删掉要二次确认。
+  c.querySelectorAll('[data-trait]').forEach(el=>{
+    el.onclick=()=>{
+      const t = d.items.find(x=>x.trait_===el.dataset.trait);
+      showDrawer('特质 · '+(t.name||t.trait_), `
+        <div class="kv">
+          <div class="k">中文名</div><div class="v">${esc(t.name||'—')}</div>
+          <div class="k">键</div><div class="v mono">${esc(t.trait_)}</div>
+          <div class="k">当前值</div><div class="v">${t.value.toFixed(2)} <span class="dim">${esc(t.word)}</span></div>
+          <div class="k">更新</div><div class="v mono">${fmtTime(t.updated_ms)}（${fmtAgo(t.updated_ms)}）</div>
+        </div>
+        <div class="sectitle">这是什么</div>
+        <p class="dim" style="font-size:12.5px;line-height:1.7">${esc(t.desc||'（没有说明）')}</p>
+        <p class="dim" style="font-size:11.5px;margin-top:12px">
+          特质只由经历慢慢累积（每次只挪一点点）。删除等于让这段人格成长消失，
+          且 trait 表没有逻辑删除 —— 删了就没了。
+        </p>`,
+        `<button class="danger" id="trDel">删除这个特质</button><span class="sp"></span>`);
+      $('trDel').onclick=()=>confirmDelete(`/v1/trait/${encodeURIComponent(t.trait_)}`, '这个特质');
+    };
+  });
 }
 
 // ---------- 承诺

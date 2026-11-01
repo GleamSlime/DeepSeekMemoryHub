@@ -4063,3 +4063,53 @@ async fn 图片支持_base64_上传() {
     let list: serde_json::Value = s.get("/v1/image").await.json().await.unwrap();
     assert_eq!(list[0]["caption"], "base64 上传的");
 }
+
+#[tokio::test]
+async fn 特质可以删除并留回滚记录() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO trait(trait, value, updated_ms) VALUES ('warmth', 0.7, 1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let r = TestServer::client()
+        .delete(format!("{}/v1/trait/warmth", s.base))
+        .header("x-api-token", TOKEN)
+        .json(&serde_json::json!({"note":"测错了"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let n: i64 = s
+        .db
+        .with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM trait", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(n, 0);
+
+    // trait 是真删，但至少有一条 rollback_log 说明它什么时候没的
+    let logs: i64 = s
+        .db
+        .with_read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM rollback_log WHERE affected_json LIKE '%warmth%'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(logs, 1, "删特质要留痕");
+
+    // 再删一次 → 404
+    let r = TestServer::client()
+        .delete(format!("{}/v1/trait/warmth", s.base))
+        .header("x-api-token", TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}

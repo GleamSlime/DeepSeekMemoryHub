@@ -149,6 +149,7 @@ pub fn router(state: AppState) -> Router {
         // 特质
         .route("/v1/trait", post(put_trait))
         .route("/v1/trait/list", get(list_traits))
+        .route("/v1/trait/{trait}", axum::routing::delete(delete_trait))
         // 情绪流水
         .route("/v1/affect", post(post_affect))
         .route("/v1/affect/list", get(list_affect))
@@ -451,6 +452,50 @@ async fn put_trait(
     })
     .await
     .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 删一个特质。
+///
+/// `trait` 表没有 `deleted_by` 列（它是「当前值」表，不是流水），
+/// 所以这里是真删 —— 但**记一行 rollback_log**，至少能说明它什么时候没的。
+/// 特质本来是经历沉淀出来的，删掉它等于让一段人格成长消失，
+/// 所以面板上要二次确认。
+async fn delete_trait(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(trait_name): axum::extract::Path<String>,
+    body: Option<Json<DeleteNote>>,
+) -> A<serde_json::Value> {
+    crate::http::check_token_or_session(&st, &headers)?;
+    let note = body.and_then(|b| b.note.clone());
+    let db = st.db.clone();
+    let name_for_log = trait_name.clone();
+    let name_for_del = trait_name.clone();
+    let n = tokio::task::spawn_blocking(move || -> Result<usize> {
+        db.with_write(|tx| {
+            let now = now_ms();
+            tx.execute(
+                "INSERT INTO rollback_log(at_ms, target_ms, mode, affected_json, note)
+                 VALUES (?1, ?1, 'delete', ?2, ?3)",
+                rusqlite::params![
+                    now,
+                    format!("[\"{name_for_log}\"]"),
+                    note.unwrap_or_else(|| "删除特质".into())
+                ],
+            )?;
+            let n = tx.execute(
+                "DELETE FROM trait WHERE trait = ?1",
+                rusqlite::params![name_for_del],
+            )?;
+            Ok(n)
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    if n == 0 {
+        return Err(Error::NotFound(format!("特质 {trait_name}")));
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

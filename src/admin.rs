@@ -63,6 +63,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/api/admin/llm", get(api_get_llm).post(api_save_llm))
         .route("/api/admin/llm/test", axum::routing::post(api_test_llm))
         .route("/api/admin/generate/log", get(api_gen_log))
+        .route("/api/admin/generate/stats", get(api_gen_stats))
         .route(
             "/api/admin/generate/tick",
             axum::routing::post(api_force_tick),
@@ -703,6 +704,28 @@ async fn api_gen_log(
         "consecutive_failures": fails,
         "tick_state": st2.unwrap_or(serde_json::Value::Null),
     })))
+}
+
+#[derive(Deserialize)]
+struct StatsQuery {
+    /// 明细返回多少条（默认 30）。
+    recent: Option<usize>,
+}
+
+/// AI 调用统计：调了哪些模型、1/7/30 天 token 消耗。
+async fn api_gen_stats(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Query(q): Query<StatsQuery>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let db = st.app.db.clone();
+    let recent = q.recent.unwrap_or(30);
+    let now = crate::db::now_ms();
+    let stats = tokio::task::spawn_blocking(move || crate::generate::stats::load(&db, now, recent))
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(serde_json::json!(stats)))
 }
 
 /// 手动触发一次 tick（面板按钮）。调试与「刚改完配置想立刻看到效果」用。

@@ -28,6 +28,7 @@ pub mod daily;
 pub mod exec;
 pub mod r#loop;
 pub mod runner;
+pub mod stats;
 pub mod throttle;
 pub mod tick;
 

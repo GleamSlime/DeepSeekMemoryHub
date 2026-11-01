@@ -133,7 +133,7 @@ pub async fn run_tick(
 
     // ---- 4. 记账 + 写回
     match res {
-        Ok(out) => {
+        Ok((out, usage)) => {
             let mut journals = 0usize;
             let mut self_updated = false;
             let mut rel_changed = 0usize;
@@ -191,8 +191,8 @@ pub async fn run_tick(
                     ok: true,
                     trigger: reason.as_str(),
                     model: &cfg.llm.model,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
                     elapsed_ms: elapsed,
                     result: Some(summary.clone()),
                     error: None,

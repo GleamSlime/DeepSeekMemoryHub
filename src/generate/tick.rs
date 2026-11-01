@@ -204,13 +204,21 @@ const SYSTEM: &str = r#"你是「蓝鲸记忆中枢」的内部整理器，负�
  "self_narrative":null,
  "relations":[{"person_id":"p-1a192349897","familiarity":1,"trust":2,"closeness":1,"reason":"他主动帮我搭了刷铁机还出了材料"}]}"#;
 
-/// 跑一次 tick。
-pub async fn run(client: &ChatClient, input: &TickInput) -> Result<TickOutput> {
+/// 跑一次 tick。返回 `(解析结果, 本次用量)`。
+///
+/// 为什么要带上用量：面板要统计「1/7/30 天花了多少 token」。
+/// 之前 tick 的用量**一直是 0**（`run` 只返回解析结果，把 `ChatOutcome`
+/// 里的 usage 丢了），于是 tick 占总调用量的一大半却完全不可见。
+pub async fn run(
+    client: &ChatClient,
+    input: &TickInput,
+) -> Result<(TickOutput, crate::llm::chat::ChatOutcome)> {
     let user = render_input(input);
     let out = client
         .chat(&[ChatMessage::system(SYSTEM), ChatMessage::user(user)])
         .await?;
-    parse(&out.text).map_err(|e| Error::Storage(format!("tick 输出解析失败：{e}")))
+    let parsed = parse(&out.text).map_err(|e| Error::Storage(format!("tick 输出解析失败：{e}")))?;
+    Ok((parsed, out))
 }
 
 /// 把输入渲染成给模型看的一段文本。

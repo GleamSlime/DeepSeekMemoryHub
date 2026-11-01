@@ -476,6 +476,7 @@ const PAGES = {
   voices:    {title:'语音库',   icon:'🎙', url:null},
   llm:       {title:'模型',     icon:'🤖', url:'/api/admin/llm'},
   genlog:    {title:'生成记录', icon:'📜', url:'/api/admin/generate/log'},
+  usage:     {title:'用量统计', icon:'📊', url:'/api/admin/generate/stats'},
   settings:  {title:'配置',     icon:'🎛', url:'/api/admin/settings'},
   persons:   {title:'身份',     icon:'👥', url:'/api/admin/persons'},
   snapshots: {title:'快照',     icon:'💾', url:'/api/admin/snapshots'},
@@ -490,7 +491,7 @@ const NAV_GROUPS = [
   {label:'人格', items:['personas','mood','self','relations','traits','promises']},
   {label:'素材', items:['images','voices']},
   {label:'渠道', items:['channels','messages']},
-  {label:'生成', items:['llm','genlog']},
+  {label:'生成', items:['llm','genlog','usage']},
   {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
 ];
 
@@ -569,6 +570,7 @@ async function render(){
     // 用户看到的就是「配置菜单里什么也没有」。
     if(state.page==='llm') return await renderLlm(c);
     if(state.page==='genlog') return await renderGenLog(c);
+    if(state.page==='usage') return await renderUsage(c);
     if(state.page==='settings') return await renderSettings(c);
     // 走到这里说明这一页没有专用渲染函数，只能靠通用表格。
     // 但**通用表格只认固定几个表名**：如果连 PAGES 里都没有这一页，
@@ -2534,6 +2536,92 @@ async function renderGenLog(c){
     <td>${r.ok?esc(r.result||'—'):`<span style="color:var(--err)">${esc((r.error||'').slice(0,80))}</span>`}</td>
   </tr>`).join('')}</tbody></table></div>`
   :'<div class="empty">还没有生成记录。配好模型后，到点（或点「立即跑一次」）就会有。</div>'}`;
+}
+
+// ---------- 用量统计
+//
+// 参考 DSH 的 local-usage：按模型 + 时间窗口看 token 消耗。
+// 但**不硬凑**它的缓存字段（cacheRead/cacheWrite）——
+// OpenAI 兼容网关普遍不返回，填一列永远为 0 的数字会让人以为「缓存没生效」。
+async function renderUsage(c){
+  const d = await api('/api/admin/generate/stats?recent=40');
+  const ov = d.overall || {};
+  const fmt = fmtNum;
+
+  const winCard = (label, w) => `
+    <div class="card" style="flex:1;min-width:150px;padding:14px 16px">
+      <div class="dim" style="font-size:11.5px">${label}</div>
+      <div style="font-size:20px;font-weight:600;margin:4px 0">${fmt(w.total_tokens||0)}</div>
+      <div class="dim" style="font-size:11.5px">
+        输入 ${fmt(w.prompt_tokens||0)} · 输出 ${fmt(w.completion_tokens||0)}
+      </div>
+      <div class="dim" style="font-size:11.5px;margin-top:4px">
+        ${fmt(w.ok||0)} 次成功${w.failed?` · <span style="color:var(--err)">${w.failed} 次失败</span>`:''}
+        ${w.avg_ms?` · 均 ${w.avg_ms}ms`:''}
+        ${w.output_tps?` · ${w.output_tps.toFixed(1)} tok/s`:''}
+      </div>
+    </div>`;
+
+  c.innerHTML = `
+  <p class="dim" style="font-size:12.5px;margin:0 0 16px">
+    中枢调模型的全部记录。**只统计成功调用** ——
+    失败那次没有产出，把它的 token 算进消耗会让人以为「花钱买了空气」
+    （调用次数与失败数仍然照算）。
+    ${d.first_ms?`统计从 ${fmtTime(d.first_ms)} 开始。`:''}
+  </p>
+
+  <div class="sectitle">全部模型</div>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:22px">
+    ${winCard('最近 1 天', ov.w1||{})}
+    ${winCard('最近 7 天', ov.w7||{})}
+    ${winCard('最近 30 天', ov.w30||{})}
+  </div>
+
+  ${(d.by_model||[]).length?`
+  <div class="sectitle">按模型（30 天）</div>
+  <div class="tablewrap"><table><thead><tr>
+    <th>模型</th><th class="num">1 天</th><th class="num">7 天</th><th class="num">30 天</th>
+    <th class="num">成功/失败</th><th class="num">均值</th><th>最后使用</th></tr></thead>
+  <tbody>${d.by_model.map(m=>`<tr>
+    <td class="mono">${esc(m.model)}</td>
+    <td class="num mono">${fmt(m.w1.total_tokens)}</td>
+    <td class="num mono">${fmt(m.w7.total_tokens)}</td>
+    <td class="num mono"><b>${fmt(m.w30.total_tokens)}</b></td>
+    <td class="num mono dim">${m.w30.ok}/${m.w30.failed}</td>
+    <td class="num mono dim">${m.w30.output_tps?m.w30.output_tps.toFixed(1)+' t/s':'—'}</td>
+    <td class="mono dim nowrap">${m.last_ms?fmtAgo(m.last_ms):'—'}</td>
+  </tr>`).join('')}</tbody></table></div>`
+  :'<div class="empty">还没有调用记录。配好模型、跑一次 tick 就会有。</div>'}
+
+  ${(d.by_purpose||[]).some(p=>p.w30&&p.w30.calls)?`
+  <div class="sectitle">按用途（30 天）</div>
+  <div class="tablewrap"><table><thead><tr>
+    <th>任务</th><th class="num">调用</th><th class="num">输入</th><th class="num">输出</th>
+    <th class="num">合计</th><th class="num">均值</th></tr></thead>
+  <tbody>${d.by_purpose.filter(p=>p.w30&&p.w30.calls).map(p=>`<tr>
+    <td>${esc({tick:'感知 tick',diary:'日记',weekly:'周记'}[p.purpose]||p.purpose)}</td>
+    <td class="num mono">${fmt(p.w30.ok)}${p.w30.failed?` <span style="color:var(--err)">(${p.w30.failed} 失败)</span>`:''}</td>
+    <td class="num mono dim">${fmt(p.w30.prompt_tokens)}</td>
+    <td class="num mono dim">${fmt(p.w30.completion_tokens)}</td>
+    <td class="num mono"><b>${fmt(p.w30.total_tokens)}</b></td>
+    <td class="num mono dim">${p.w30.avg_ms?p.w30.avg_ms+'ms':'—'}</td>
+  </tr>`).join('')}</tbody></table></div>`:''}
+
+  ${(d.recent||[]).length?`
+  <div class="sectitle">最近调用</div>
+  <div class="tablewrap"><table><thead><tr>
+    <th>时间</th><th>任务</th><th>模型</th><th>结果</th>
+    <th class="num">输入</th><th class="num">输出</th><th class="num">耗时</th><th>说明</th></tr></thead>
+  <tbody>${d.recent.map(r=>`<tr>
+    <td class="mono dim nowrap">${fmtTime(r.at_ms)}</td>
+    <td>${esc({tick:'tick',diary:'日记',weekly:'周记'}[r.purpose]||r.purpose)}</td>
+    <td class="mono dim" style="font-size:11.5px">${esc(r.model||'—')}</td>
+    <td>${r.ok?'<span class="badge b-ok">成功</span>':'<span class="badge b-err">失败</span>'}</td>
+    <td class="num mono">${r.prompt_tokens?fmt(r.prompt_tokens):'—'}</td>
+    <td class="num mono">${r.completion_tokens?fmt(r.completion_tokens):'—'}</td>
+    <td class="num mono dim">${r.elapsed_ms}ms</td>
+    <td class="dim" style="max-width:220px">${esc((r.ok?r.result:r.error)||'—')}</td>
+  </tr>`).join('')}</tbody></table></div>`:''}`;
 }
 
 // ---------- 配置

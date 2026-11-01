@@ -50,6 +50,90 @@ const WEEKLY_SYS: &str = r#"你是一个有自己生活的角色，现在要写�
 
 直接输出周记正文。"#;
 
+/// 回填：为指定的某一天生成日记（不管 `gen_state` 说什么）。
+///
+/// # 为什么单独一个入口
+///
+/// 定时任务只处理「今天」。历史缺口（比如 MC 停了三天、journal 从 10-30 断掉）
+/// 用定时任务补不了 —— 它的窗口永远是「昨天到现在」。
+///
+/// # 为什么按天分开跑
+///
+/// 三天合成一次：模型会把三天混成一篇，且 token 会翻三倍；
+/// 更重要的是「一天的日记」本来就该只写那一天。
+pub async fn backfill_day(
+    db: &Arc<Db>,
+    cfg: &crate::config::Config,
+    day_start_ms: i64,
+) -> Result<String> {
+    let day_end = day_start_ms + 86_400_000;
+    // **先看有没有真素材再调用模型**。
+    //
+    // 之前用 `material.contains("- ")` 判断，那是错的：`render_material` 的
+    // 标题就是 `## 发生的事` / `## 对话`，一个都匹配不上，于是这个判据
+    // 永远成立 —— 2026-11-01 实测：10-28 那天 0 事件 0 对话，照样花了一次
+    // 请求，模型只好写一篇「这天什么都没发生」。
+    // 那种文章不难看，但**不该花钱**：它没有任何信息量。
+    let events = crate::generate::collect::range_events(db, day_start_ms, day_end, 0.25, 200)?;
+    let talks = crate::generate::collect::range_talks(db, day_start_ms, day_end, 300)?;
+    if events.is_empty() && talks.is_empty() {
+        return Err(Error::BadRequest(format!(
+            "{} 这一天没有任何素材（0 事件 0 对话），跳过",
+            crate::generate::collect::fmt_day(day_start_ms)
+        )));
+    }
+    let material = render_material(&events, &talks, None);
+    let client = runner::client(cfg);
+    let (res, elapsed) =
+        runner::timed(client.chat(&[ChatMessage::system(DIARY_SYS), ChatMessage::user(material)]))
+            .await;
+    match res {
+        Ok(out) => {
+            let body = out.text.trim();
+            if body.is_empty() {
+                return Err(Error::Storage("模型返回空文本".into()));
+            }
+            let id = write_diary(db, Purpose::Diary, body, day_start_ms, day_end)?;
+            runner::log(
+                db,
+                Record {
+                    purpose: Purpose::Diary,
+                    ok: true,
+                    trigger: "backfill",
+                    model: &cfg.llm.model,
+                    prompt_tokens: out.prompt_tokens,
+                    completion_tokens: out.completion_tokens,
+                    elapsed_ms: elapsed,
+                    result: Some(format!(
+                        "回填 {}：{} 字",
+                        crate::generate::collect::fmt_day(day_start_ms),
+                        body.chars().count()
+                    )),
+                    error: None,
+                },
+            );
+            Ok(id)
+        }
+        Err(e) => {
+            runner::log(
+                db,
+                Record {
+                    purpose: Purpose::Diary,
+                    ok: false,
+                    trigger: "backfill",
+                    model: &cfg.llm.model,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    elapsed_ms: elapsed,
+                    result: None,
+                    error: Some(e.to_string()),
+                },
+            );
+            Err(e)
+        }
+    }
+}
+
 /// 到点了就跑（内部判断该不该跑）。
 ///
 /// 幂等：`gen_state` 记着「最后一次成功的时刻」，同一天不会重复生成。
@@ -85,7 +169,10 @@ pub async fn maybe_run(db: &Arc<Db>, cfg: &crate::config::Config, purpose: Purpo
         Purpose::Diary => collect_day(db, window_start, now)?,
         _ => collect_week(db, window_start, now)?,
     };
-    if material.trim().is_empty() {
+    // 判「空」要看有没有实际条目，不是看渲染出来的文本长度
+    // （标题本身就是字，`trim().is_empty()` 永远为假）
+    let has_content = material.lines().any(|l| l.trim_start().starts_with("- "));
+    if !has_content {
         // 一整天什么都没有：不生成（也**不推进水位线**？—— 要推进，
         // 否则每天都会重试一次空日记）。记一条「素材为空」并推进。
         tracing::info!("{} 没有素材，跳过", purpose.as_str());
@@ -318,6 +405,32 @@ mod tests {
         let m = render_material(&[], &[], Some(&[(1_700_000_000_000, "昨天钓了鱼".into())]));
         assert!(m.contains("这几天我写的日记"));
         assert!(m.contains("昨天钓了鱼"));
+    }
+
+    /// 回归：**空素材不能花钱调用模型**。
+    ///
+    /// 旧判据 `material.contains("- ")` 永远为假（标题是 `## 发生的事`），
+    /// 于是「0 事件 0 对话」的日子照样请求一次，模型写一篇
+    /// 「这天什么都没发生」—— 不难看，但零信息量、白花钱。
+    #[test]
+    fn 空素材要能被判出来() {
+        let empty = render_material(&[], &[], None);
+        assert!(
+            !empty.lines().any(|l| l.trim_start().starts_with("- ")),
+            "空材料不该有条目行：{empty}"
+        );
+        let full = render_material(
+            &[crate::generate::tick::TickEvent {
+                at_ms: 1,
+                channel: "mc".into(),
+                kind: "died".into(),
+                summary: "被炸死".into(),
+                importance: 0.8,
+            }],
+            &[],
+            None,
+        );
+        assert!(full.lines().any(|l| l.trim_start().starts_with("- ")));
     }
 
     #[test]

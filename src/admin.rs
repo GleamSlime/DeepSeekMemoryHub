@@ -67,6 +67,10 @@ pub fn router(state: AdminState) -> Router {
             "/api/admin/generate/tick",
             axum::routing::post(api_force_tick),
         )
+        .route(
+            "/api/admin/generate/backfill",
+            axum::routing::post(api_backfill),
+        )
         .route("/api/admin/plans", get(api_plans))
         .route("/api/admin/plan/{id}", get(api_plan_detail))
         .route("/api/admin/timeline", get(api_timeline))
@@ -736,6 +740,84 @@ async fn api_force_tick(
 ///
 /// **注意这里不放 token / 口令**：面板能读配置不等于能读凭据。
 /// 那两条一旦出现在这里，任何一次截图或日志转发都会泄露。
+#[derive(Deserialize)]
+struct BackfillReq {
+    /// `YYYY-MM-DD` 列表。空 = 自动找最近 7 天的缺口。
+    days: Option<Vec<String>>,
+}
+
+/// 回填历史日记。
+///
+/// 用户要求「要做，以测试效果」——所以这个接口是**手动触发 + 明确报进度**，
+/// 不做成后台自动跑：一次回填会花好几个请求，该由人决定什么时候花。
+async fn api_backfill(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(req): Json<BackfillReq>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let llm = st
+        .app
+        .llm
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    if !llm.is_ready() {
+        return Err(Error::BadRequest("LLM 还没配置".into()));
+    }
+    let gen = st
+        .app
+        .gen_cfg
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    let mut c = (*st.app.cfg).clone();
+    c.llm = llm;
+    c.generate = gen;
+
+    // 要补哪些天：显式给的，否则最近 7 天里没有 day 日记的
+    let db = st.app.db.clone();
+    let want: Vec<i64> = match req.days {
+        Some(ds) => {
+            let mut out = Vec::new();
+            for d in ds {
+                match crate::generate::collect::parse_day(&d) {
+                    Some(ms) => out.push(ms),
+                    None => {
+                        return Err(Error::BadRequest(format!(
+                            "日期格式要 YYYY-MM-DD，收到 {d}"
+                        )))
+                    }
+                }
+            }
+            out
+        }
+        None => {
+            let db2 = db.clone();
+            tokio::task::spawn_blocking(move || crate::generate::collect::missing_days(&db2, 7))
+                .await
+                .map_err(|e| Error::Storage(e.to_string()))??
+        }
+    };
+
+    let mut done = Vec::new();
+    let mut failed = Vec::new();
+    for day in want {
+        let label = crate::generate::collect::fmt_day(day);
+        match crate::generate::daily::backfill_day(&db, &c, day).await {
+            Ok(id) => done.push(serde_json::json!({"day": label, "id": id})),
+            Err(e) => failed.push(serde_json::json!({"day": label, "error": e.to_string()})),
+        }
+        // 每次之间歇一下：连续打会被网关限流（429），而回填不着急
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "done": done,
+        "failed": failed,
+    })))
+}
+
 async fn api_settings(
     State(st): State<AdminState>,
     headers: HeaderMap,

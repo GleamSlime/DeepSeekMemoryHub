@@ -126,6 +126,37 @@ impl Throttle {
         Decision::Skip(SkipReason::TooSoon)
     }
 
+    /// 用**外部给的真实待处理条数**判断（而不是内存计数器）。
+    ///
+    /// 为什么不直接用 `self.pending`：那个计数要靠写入路径调 `note_event`，
+    /// 实测没有任何调用点 —— 结果是 `pending` 永远 0，tick 永远不跑。
+    /// 现在改成从库里数，这个接口就是给它用的。
+    pub fn decide_with(
+        &self,
+        now_ms: i64,
+        pending: usize,
+        batch: usize,
+        interval_secs: u64,
+    ) -> Decision {
+        if pending == 0 {
+            return Decision::Skip(SkipReason::NothingNew);
+        }
+        let Some(last) = self.last_run_ms else {
+            return Decision::Run(RunReason::BatchFull);
+        };
+        let since = now_ms.saturating_sub(last);
+        if since < MIN_GAP_MS {
+            return Decision::Skip(SkipReason::TooSoon);
+        }
+        if pending >= batch.max(1) {
+            return Decision::Run(RunReason::BatchFull);
+        }
+        if since >= (interval_secs as i64).saturating_mul(1000) {
+            return Decision::Run(RunReason::IntervalElapsed);
+        }
+        Decision::Skip(SkipReason::TooSoon)
+    }
+
     /// 跑完之后调用：清空待处理、记下时间。
     pub fn mark_run(&mut self, now_ms: i64) {
         self.last_run_ms = Some(now_ms);

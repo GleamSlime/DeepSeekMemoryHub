@@ -108,7 +108,10 @@ pub fn last_ok_ms(db: &Db, purpose: Purpose) -> Option<i64> {
 pub fn consecutive_failures(db: &Db, purpose: Purpose) -> i64 {
     db.with_read(|c| {
         let mut stmt = c.prepare(
-            "SELECT ok FROM generation_log WHERE purpose = ?1 ORDER BY at_ms DESC LIMIT 20",
+            // 按 **id** 排序而不是 at_ms：同一毫秒内写的多条 at_ms 相同，
+            // 排序不确定 → 「连续失败几资」会随机错（并行测试里必现）。
+            // id 是 AUTOINCREMENT，就是插入顺序。
+            "SELECT ok FROM generation_log WHERE purpose = ?1 ORDER BY id DESC LIMIT 20",
         )?;
         let oks: Vec<i64> = stmt
             .query_map(rusqlite::params![purpose.as_str()], |r| r.get(0))?
@@ -294,6 +297,11 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146097 + doe - 719468
+}
+
+/// 公历年月日 → 天数。公开给 `collect::parse_day` 用。
+pub fn days_from_civil_pub(y: i64, m: i64, d: i64) -> i64 {
+    days_from_civil(y, m, d)
 }
 
 /// 天数的逆运算：(年, 月, 日)。公开给 `collect::fmt_day` 用。

@@ -39,12 +39,37 @@ pub async fn run_tick(
     let g = &cfg.generate;
 
     // ---- 1. 该不该跑
+    //
+    // ⚠️ **"有没有新东西"必须查库，不能靠内存计数器**。
+    // `Throttle::note_event` 需要写入路径每个事件都调一次，而实际没有一个
+    // 调用点（2026-11-01 实测：pending 永远是 0 → 每分钟都判 nothing_new，
+    // tick 一次都没跑过，手帐/情绪完全停摆）。查库的好处是：
+    // 不依赖任何调用点、进程重启也不丢、写入方漏调用也不会让功能静默失效。
+    let since_probe = {
+        let mem = state
+            .throttle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .watermark_ms();
+        let disk = runner::state_get(db, "tick_watermark").unwrap_or(0);
+        match (mem, disk) {
+            (0, 0) => now - 6 * 3_600_000,
+            (a, b) => a.max(b),
+        }
+    };
+    let pending = crate::generate::collect::count_new(db, since_probe, now, g.tick_min_importance)?;
+
     let decision = {
         let t = state.throttle.lock().unwrap_or_else(|e| e.into_inner());
         if force {
             Decision::Run(crate::generate::throttle::RunReason::Manual)
+        } else if !g.tick_enabled {
+            Decision::Skip(crate::generate::throttle::SkipReason::Disabled)
+        } else if pending == 0 {
+            Decision::Skip(crate::generate::throttle::SkipReason::NothingNew)
         } else {
-            t.decide(now, g.tick_enabled, g.tick_batch, g.tick_interval_seconds)
+            // 把查出来的真实条数灌进节流器再判（它只看 pending 与时间）
+            t.decide_with(now, pending, g.tick_batch, g.tick_interval_seconds)
         }
     };
 
@@ -271,6 +296,73 @@ mod tests {
         let r = run_tick(&db, &cfg, &state, false).await.unwrap();
         assert!(!r.ran);
         assert_eq!(r.why, "nothing_new");
+    }
+
+    /// 回归：`pending` 必须来自**查库**，不能靠内存计数器。
+    ///
+    /// 线上真踩过：`note_event` 一个调用点都没有 → pending 永远 0 →
+    /// 每分钟都判 nothing_new，tick 一次都没跑过（手帐/情绪完全停摆，
+    /// 而日志上一切正常，只是「跳过」）。
+    #[tokio::test]
+    async fn 有新事件时才认为有待处理() {
+        let (db, _g) = crate::generate::runner::tests_support::fresh_db();
+        let now = crate::db::now_ms();
+        // 没有事件 → 0
+        assert_eq!(
+            crate::generate::collect::count_new(&db, now - 3_600_000, now, 0.35).unwrap(),
+            0
+        );
+        // 写一条够格的 → 1
+        db.with_write(|tx| {
+            tx.execute(
+                "INSERT INTO event(at_ms, kind, channel, summary, importance, scope)
+                 VALUES (?1,'died','mc','被炸死',0.9,'companion')",
+                rusqlite::params![now - 1000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            crate::generate::collect::count_new(&db, now - 3_600_000, now, 0.35).unwrap(),
+            1
+        );
+        // 低重要度的不算
+        db.with_write(|tx| {
+            tx.execute(
+                "INSERT INTO event(at_ms, kind, channel, summary, importance, scope)
+                 VALUES (?1,'said','qq','哈哈哈',0.1,'companion')",
+                rusqlite::params![now - 500],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            crate::generate::collect::count_new(&db, now - 3_600_000, now, 0.35).unwrap(),
+            1,
+            "闲聊不该让 tick 跑起来"
+        );
+    }
+
+    /// 群聊本身也算「有事发生」—— 用户要的「群聊也触发情绪」正是这个。
+    #[tokio::test]
+    async fn 群聊也能触发() {
+        let (db, _g) = crate::generate::runner::tests_support::fresh_db();
+        let now = crate::db::now_ms();
+        db.with_write(|tx| {
+            tx.execute(
+                "INSERT INTO channel_message(channel, group_id, account, sender_name,
+                                             content, at_ms)
+                 VALUES ('qq','g1','1','姆姆','今天好累',?1)",
+                rusqlite::params![now - 1000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            crate::generate::collect::count_new(&db, now - 3_600_000, now, 0.35).unwrap(),
+            1,
+            "没有一点重要度事件的纯群聊也要能触发"
+        );
     }
 
     /// 关掉 tick 就该完全不动。

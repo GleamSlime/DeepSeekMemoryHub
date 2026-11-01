@@ -38,6 +38,31 @@ pub fn gather(
     })
 }
 
+/// 数一下「自 `since` 以来有多少条够格的新东西」（事件 + 对话）。
+///
+/// 这是 tick「该不该跑」的判据。用查库而不是内存计数器，理由见
+/// `exec::run_tick` 里的注释：计数器要靠写入路径调 `note_event`，
+/// 而实际一个调用点都没有。
+pub fn count_new(db: &Db, since: i64, to: i64, min_importance: f64) -> Result<usize> {
+    db.with_read(|c| {
+        let ev: i64 = c.query_row(
+            "SELECT COUNT(*) FROM event
+             WHERE deleted_by IS NULL AND at_ms > ?1 AND at_ms <= ?2 AND importance >= ?3",
+            rusqlite::params![since, to, min_importance],
+            |r| r.get(0),
+        )?;
+        // 对话也计入：一群人聊天本身就是「有事发生」，
+        // 哪怕没有一条够格的事件（用户要的「群聊也触发情绪」正是这个）
+        let tk: i64 = c.query_row(
+            "SELECT COUNT(*) FROM channel_message
+             WHERE deleted_by IS NULL AND at_ms > ?1 AND at_ms <= ?2",
+            rusqlite::params![since, to],
+            |r| r.get(0),
+        )?;
+        Ok((ev + tk) as usize)
+    })
+}
+
 /// 按时间范围取事件（日记/周记用）。
 pub fn range_events(
     db: &Db,
@@ -111,6 +136,45 @@ pub fn range_diaries(db: &Db, from: i64, to: i64, limit: usize) -> Result<Vec<(i
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    })
+}
+
+/// 解析 `YYYY-MM-DD` 成**本地**当天 0 点的毫秒时间戳。
+pub fn parse_day(s: &str) -> Option<i64> {
+    let mut it = s.trim().split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let days = crate::generate::runner::days_from_civil_pub(y, m, d);
+    Some(days * 86_400_000)
+}
+
+/// 最近 `n` 天里**还没有** day 日记的那些天（本地 0 点毫秒）。
+///
+/// 回填用：定时任务只处理「今天」，历史缺口得靠它找出来。
+pub fn missing_days(db: &Db, n: i64) -> Result<Vec<i64>> {
+    let now = crate::db::now_ms();
+    let today = now.div_euclid(86_400_000);
+    db.with_read(|c| {
+        let mut out = Vec::new();
+        for i in 1..=n {
+            let day = (today - i) * 86_400_000;
+            let end = day + 86_400_000;
+            let exists: i64 = c.query_row(
+                "SELECT COUNT(*) FROM diary
+                 WHERE deleted_by IS NULL AND kind = 'day'
+                   AND window_end_ms > ?1 AND window_end_ms <= ?2",
+                rusqlite::params![day, end],
+                |r| r.get(0),
+            )?;
+            if exists == 0 {
+                out.push(day);
+            }
+        }
+        Ok(out)
     })
 }
 
@@ -384,6 +448,40 @@ mod tests {
         assert_eq!(i.talks.len(), 1);
         assert_eq!(i.talks[0].who, "姆姆");
         assert_eq!(i.talks[0].content, "今天好累");
+    }
+
+    #[test]
+    fn 解析日期() {
+        assert_eq!(parse_day("1970-01-01"), Some(0));
+        assert_eq!(parse_day("2026-11-01"), Some(20758 * 86_400_000));
+        assert_eq!(parse_day("坏"), None);
+        assert_eq!(parse_day("2026-13-01"), None, "月份越界");
+        assert_eq!(parse_day("2026-01-32"), None, "日期越界");
+    }
+
+    #[test]
+    fn 找出缺日记的天() {
+        let (db, _g) = tmp_db();
+        let now = crate::db::now_ms();
+        let today = now.div_euclid(86_400_000);
+        // 昨天有日记，前天没有
+        db.with_write(|tx| {
+            let y = (today - 1) * 86_400_000;
+            tx.execute(
+                "INSERT INTO diary(id, kind, window_start_ms, window_end_ms,
+                                   title, body, model, created_ms, updated_ms)
+                 VALUES ('d1','day',?1,?2,'昨天','正文','m',1,1)",
+                rusqlite::params![y, y + 86_400_000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let miss = missing_days(&db, 3).unwrap();
+        assert_eq!(miss.len(), 2, "前天和大前天缺：{miss:?}");
+        assert!(
+            !miss.contains(&((today - 1) * 86_400_000)),
+            "昨天有，不该算缺"
+        );
     }
 
     #[test]

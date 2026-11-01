@@ -9,6 +9,11 @@ export BLUEWHALE_TOKEN="$(cat data/.token)"
 export BLUEWHALE_PANEL_USER=admin
 export BLUEWHALE_PANEL_PASSWORD="$(cat data/.panel_pw)"
 
+# 日志级别。**打开 generate=trace 能看到「后台循环每轮为什么跳过」** ——
+# 这个循环最大的风险是静默停摆（线程 panic / await 卡死时日志全无），
+# 排查「很久没生成」时先把它开起来。
+export RUST_LOG="${RUST_LOG:-info,hyper=warn,bluewhale_memory::generate=debug}"
+
 # ------------------------------------------------------------ 知识库
 #
 # 嵌入服务在另一台机器上（192.168.3.252 的 Ollama）。

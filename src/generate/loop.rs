@@ -39,6 +39,10 @@ pub fn spawn(
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             iv.tick().await;
+            // 每轮打一条：这个循环最大的风险是「静默停摆」——
+            // 线程 panic 或 await 卡死时，日志上什么都不会有，
+            // 而现象只是「很久没生成」，很难往这里想。
+            tracing::debug!("生成循环：开始第 N 轮检查");
             step(&db, &cfg, &llm, &gen_cfg, &state).await;
         }
     });
@@ -70,8 +74,10 @@ async fn step(
     c.generate = gen.clone();
 
     // ---- 1. 被动 tick（内部自带节流判据）
-    if let Err(e) = crate::generate::exec::run_tick(db, &c, state, false).await {
-        tracing::warn!("tick 迭代失败：{e}");
+    match crate::generate::exec::run_tick(db, &c, state, false).await {
+        Ok(r) if r.ran => tracing::info!("循环 tick：跑了（{}）", r.why),
+        Ok(r) => tracing::trace!("循环 tick：跳过（{}）", r.why),
+        Err(e) => tracing::warn!("tick 迭代失败：{e}"),
     }
 
     // ---- 2. 每日/每周（内部自带「今天跑过没有」判据）

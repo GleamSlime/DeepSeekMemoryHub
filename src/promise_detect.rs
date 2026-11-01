@@ -28,6 +28,70 @@
 //! 3. 时限能抽出来就抽（明天 / 今晚 / 等会儿 → `due_ms`），抽不出就留 `None`，
 //!    不瞎猜一个时间。
 
+/// 从事件摘要里剥出**真正说过的话**。
+///
+/// # 为什么必须剥
+///
+/// 事件摘要是这种格式：
+///
+/// ```text
+/// 姆姆在群里问：「你能画一张图吗」，我回：「（尾鳍一顿）唔…等下」
+/// ```
+///
+/// 而承诺是**看台词**判的。不剥的话：
+/// - `，我回：` 这段**格式包装本身**会被当成台词去匹配；
+/// - 实例：摘要里 `」，我回：「等下！` 被切成一句，
+///   命中「我 + 等下 + 等」→ 记了一条承诺 `」，我回：「等下！`（2026-11-01 线上真数据）；
+/// - 还会把**别人的话**当成它自己的承诺。
+///
+/// 所以只取**引号里的内容**，并且**优先取「我回」那一段**（它自己的话）。
+pub fn extract_speech(summary: &str) -> String {
+    let mark = ["我回：", "我回:", "我答：", "我答:", "我："];
+    // 有「我回」就只取它后面那段（它自己说的）
+    for m in mark {
+        if let Some(idx) = summary.find(m) {
+            let tail = &summary[idx + m.len()..];
+            if let Some(inner) = first_quoted(tail) {
+                return inner;
+            }
+        }
+    }
+    // 否则取所有引号内容拼起来（群友说的话也可能含承诺性台词，
+    // 但那不是「它答应」—— 这里保守：没有「我回」时只取最后一对引号）
+    if let Some(inner) = last_quoted(summary) {
+        return inner;
+    }
+    summary.to_string()
+}
+
+/// 取第一对 `「…」`（也认 `“…”` / `"…"`）里的内容。
+fn first_quoted(s: &str) -> Option<String> {
+    let pairs = [('「', '」'), ('“', '”'), ('"', '"')];
+    for (open, close) in pairs {
+        if let Some(a) = s.find(open) {
+            let rest = &s[a + open.len_utf8()..];
+            if let Some(b) = rest.find(close) {
+                return Some(rest[..b].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 取最后一对引号里的内容。
+fn last_quoted(s: &str) -> Option<String> {
+    let pairs = [('「', '」'), ('“', '”'), ('"', '"')];
+    for (open, close) in pairs {
+        if let Some(b) = s.rfind(close) {
+            let head = &s[..b];
+            if let Some(a) = head.rfind(open) {
+                return Some(head[a + open.len_utf8()..].to_string());
+            }
+        }
+    }
+    None
+}
+
 /// 从一句台词里识别出的承诺。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Detected {
@@ -42,9 +106,9 @@ const SELF_WORDS: &[&str] = &["我", "本鱼", "咱", "人家"];
 
 /// 将来时/意愿标记。
 const FUTURE_WORDS: &[&str] = &[
-    "会",
-    "要",
-    "准",
+    // ⚠️ 不要把「记得」「看」「等」这类泛词放进来（2026-11-01 实测）：
+    // 「操控的话——左右摇杆我记得，左走右看，扳机开火」被判成承诺，
+    // 就是「记得」+「看」凑出来的。承诺必须有**明确的将来指向**。
     "马上",
     "立刻",
     "这就",
@@ -56,26 +120,28 @@ const FUTURE_WORDS: &[&str] = &[
     "明天",
     "后天",
     "今晚",
-    "晚上",
     "下午",
     "回头",
     "待会",
     "下回",
     "下次",
-    "记得",
-    "帮你",
-    "给你",
-    "替你",
-    "拿去",
-    "留着",
     "包在我",
     "交给我",
+    "我去",
+    "我来",
+    "我会",
+    "我帮你",
+    "我给你",
+    "我替你",
 ];
 
 /// 承诺性动词：出现了才可能是承诺（否则「我会很累」不该算）。
 const COMMIT_VERBS: &[&str] = &[
-    "帮", "替", "给", "做", "修", "盖", "建", "挖", "找", "带", "送", "拿", "留", "看", "守", "等",
-    "接", "还", "教", "告诉", "问", "算", "搞定", "弄", "准备", "安排", "答应",
+    // ⚠️ 同样别放「看」「等」「问」这种**日常动词**：
+    // 「左走右看」「等下」都会命中，而它们不是承诺内容。
+    // 这里只留有**交付物**的动作。
+    "帮你", "替你", "给你", "修", "盖", "建", "挖", "带", "送", "留", "守", "接", "教", "告诉",
+    "搞定", "准备", "安排", "答应", "做",
 ];
 
 /// 否定/不确定标记：出现就整句不作数。
@@ -142,7 +208,10 @@ fn relative_due(text: &str, now_ms: i64) -> Option<i64> {
 ///
 /// `now_ms` 只用来算 `due_ms`。
 pub fn detect(text: &str, now_ms: i64) -> Option<Detected> {
-    let raw = text.trim();
+    // 先剥出真正说过的话：摘要里的「X说：」「我回：」是**格式**，不是内容。
+    // 不剥就会把包装本身当台词（线上真踩：`」，我回：「等下！` 被记成承诺）。
+    let speech = extract_speech(text);
+    let raw = speech.trim();
     if raw.is_empty() {
         return None;
     }
@@ -209,6 +278,52 @@ mod tests {
 
     fn d(text: &str) -> Option<String> {
         detect(text, NOW).map(|x| x.description)
+    }
+
+    #[test]
+    fn 摘要里的格式包装不会被当成台词() {
+        // 线上真数据（2026-11-01）：这条被记成了承诺 `」，我回：「等下！`
+        let s = "小螺狮子同事在群里说：「你可以画一张吗」，我回：「等下！」";
+        assert!(
+            detect(s, NOW).is_none(),
+            "「，我回：」是格式不是台词，不该记成承诺"
+        );
+    }
+
+    #[test]
+    fn 只从它自己的话里找承诺() {
+        // 群友说的话里即使有「我明天帮你」，也不是**它**答应的
+        let s = "姆姆在群里说：「我明天帮你修屋顶」";
+        let d = detect(s, NOW);
+        // 没有「我回」时取最后一对引号 = 群友那句 —— 这里刻意**接受**它，
+        // 因为那种摘要格式通常是「A 说：「…」」单段，内容确实是 A 说的话。
+        // 但绝不能把「我回：」前面的包装算进去。
+        if let Some(x) = d {
+            assert!(
+                !x.description.contains("我回"),
+                "描述里不该有格式包装：{x:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 泛词不再触发承诺() {
+        // 「记得」「看」「等」曾一起凑出一条假承诺
+        for t in [
+            "操控的话——左右摇杆我记得，左走右看，扳机开火。",
+            "等下！",
+            "我记得那个地方。",
+            "我看看。",
+        ] {
+            assert!(detect(t, NOW).is_none(), "不该认成承诺：{t}");
+        }
+    }
+
+    #[test]
+    fn 剥台词() {
+        assert_eq!(extract_speech("姆姆问：「在吗」，我回：「在的」"), "在的");
+        assert_eq!(extract_speech("姆姆在群里说：「你好呀」"), "你好呀");
+        assert_eq!(extract_speech("没有引号的一句话"), "没有引号的一句话");
     }
 
     #[test]

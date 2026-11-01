@@ -4594,3 +4594,78 @@ async fn 挑图接口按关键词返回一张() {
     let r = s.get("/v1/image/pick?q=图").await;
     assert_eq!(r.status(), 400, "单字关键词应被拒");
 }
+
+#[tokio::test]
+async fn 挑图两种意图排序相反() {
+    // 用户 2026-11-01 指出：表情包和回忆的排序是**反的**。
+    //   emoji  → 发得少的优先（别反复刷同一张）
+    //   recall → 用得多的优先（常说起的才是那张有代表性的）
+    // 不区分的话只能二选一，总有一边是错的。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        for (id, used, last) in [
+            ("often", 9, 5000), // 提起最多
+            ("rare", 0, 1000),  // 从没发过
+            ("mid", 3, 3000),
+        ] {
+            tx.execute(
+                "INSERT INTO image(id, file, bytes, caption, keywords,
+                                   recall_count, last_recall_ms, created_ms, updated_ms)
+                 VALUES (?1, ?1||'.png', 100, '图', '开心', ?2, ?3, 1, 1)",
+                rusqlite::params![id, used, last],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    // 默认（emoji）：挑发得最少的
+    let j: serde_json::Value = s.get("/v1/image/pick?q=开心").await.json().await.unwrap();
+    assert_eq!(j["id"], "rare", "emoji 模式该挑发得最少的：{j}");
+    assert_eq!(j["mode"], "emoji");
+
+    // recall：挑用得最多的
+    let j: serde_json::Value = s
+        .get("/v1/image/pick?q=开心&mode=recall")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["id"], "often", "recall 模式该挑用得最多的：{j}");
+    assert_eq!(j["mode"], "recall");
+}
+
+#[tokio::test]
+async fn 挑图_mode_拼错会被拒() {
+    // 拼错 mode 时静默当成 emoji 会让「想回忆」退化成「轮换」，
+    // 结果看起来像随机发的 —— 必须当场报。
+    let s = TestServer::start().await;
+    let r = s.get("/v1/image/pick?q=开心&mode=recal").await;
+    assert_eq!(r.status(), 400);
+    let txt = r.text().await.unwrap();
+    assert!(txt.contains("emoji 或 recall"), "错误要说清可选项：{txt}");
+}
+
+#[tokio::test]
+async fn recall_模式同次数时最近用过的优先() {
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        for (id, last) in [("old", 1000), ("recent", 9000)] {
+            tx.execute(
+                "INSERT INTO image(id, file, bytes, caption, keywords,
+                                   recall_count, last_recall_ms, created_ms, updated_ms)
+                 VALUES (?1, ?1||'.png', 100, '图', '开心', 2, ?2, 1, 1)",
+                rusqlite::params![id, last],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let j: serde_json::Value = s
+        .get("/v1/image/pick?q=开心&mode=recall")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(j["id"], "recent", "同次数时刚用过的更可能是要回忆的：{j}");
+}

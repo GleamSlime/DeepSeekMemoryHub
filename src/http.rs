@@ -3003,6 +3003,18 @@ struct PickQuery {
     q: String,
     /// 只要这个渠道的图（可选）。
     channel: Option<String>,
+    /// 挑选意图：`emoji`（默认）或 `recall`。
+    ///
+    /// **两种需求的排序是相反的**，这是用户 2026-11-01 指出的：
+    ///
+    /// | 意图 | 要什么 | 排序 |
+    /// | --- | --- | --- |
+    /// | `emoji` | 发张表情包活跃气氛 | **发得少的优先**，避免同一张反复刷屏 |
+    /// | `recall` | 「你记得那次…吗」把具体那张翻出来 | **用得多的优先** —— 常说起的才是那张「代表性」的图 |
+    ///
+    /// 不区分的话只能二选一，总有一边是错的。
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 /// 按关键词挑一张图（**表情包场景**）。
@@ -3027,6 +3039,21 @@ async fn pick_image(
     if words.is_empty() {
         return Err(Error::BadRequest("q 里至少要有一个 2 字以上的词".into()));
     }
+    // 只接受两个值：拼错时当场报，而不是静默当成 emoji
+    // （拼错 `recall` 会让「想回忆」退化成「轮换」，结果看起来像随机发的）。
+    let mode = q
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("emoji")
+        .to_string();
+    if mode != "emoji" && mode != "recall" {
+        return Err(Error::BadRequest(format!(
+            "mode 只能是 emoji 或 recall，收到 {mode}"
+        )));
+    }
+    let mode_out = mode.clone();
     let db = st.db.clone();
     let channel = q.channel.clone();
     let hit = tokio::task::spawn_blocking(move || -> Result<Option<crate::image::ImageItem>> {
@@ -3050,8 +3077,24 @@ async fn pick_image(
                     })
             })
             .collect();
-        // 发得少的优先，再按上次使用时间早的优先（= 轮换）
-        cands.sort_by_key(|i| (i.recall_count, i.last_recall_ms.unwrap_or(0)));
+        // 两种意图的排序**相反**（见 `PickQuery::mode` 的注释）：
+        //   emoji  → 发得少的优先（轮换，别反复刷同一张）
+        //   recall → 用得多的优先（常说起的才是那张有代表性的）
+        match mode.as_str() {
+            "recall" => {
+                // 用得多的在前；同次数时**最近用过的**在前（刚说过的那张最可能是要回忆的）
+                cands.sort_by_key(|i| {
+                    (
+                        std::cmp::Reverse(i.recall_count),
+                        std::cmp::Reverse(i.last_recall_ms.unwrap_or(0)),
+                    )
+                })
+            }
+            _ => {
+                // 发得少的在前；同次数时上次用得早的在前（轮换）
+                cands.sort_by_key(|i| (i.recall_count, i.last_recall_ms.unwrap_or(0)))
+            }
+        }
         Ok(cands.into_iter().next())
     })
     .await
@@ -3059,14 +3102,14 @@ async fn pick_image(
 
     Ok(Json(match hit {
         Some(img) => serde_json::json!({
-            "ok": true, "found": true,
+            "ok": true, "found": true, "mode": mode_out,
             "id": img.id,
             "caption": img.caption,
             "keywords": img.keywords,
             "file": format!("/v1/image/{}/file", img.id),
             "recall_count": img.recall_count,
         }),
-        None => serde_json::json!({ "ok": true, "found": false }),
+        None => serde_json::json!({ "ok": true, "found": false, "mode": mode_out }),
     }))
 }
 

@@ -39,6 +39,15 @@ pub struct ImageItem {
     pub person_ids: Option<String>,
     pub recall_count: i64,
     pub last_recall_ms: Option<i64>,
+    /// 这张图**是干什么用的**：`emoji`（表情包）/ `photo`（普通图/回忆）。
+    ///
+    /// 为什么单独一个字段而不是靠 keywords 约定：自动发图时「挑一张表情包活跃气氛」
+    /// 和「把那次湖边的照片翻出来」是**两件完全不同的事**，混在一个池子里挑，
+    /// 就会在闲聊里发出别人的生活照。靠关键词里塞 `[表情包]` 也能凑，
+    /// 但那等于让「检索词」兼职「类型」，一旦有人手工改关键词就悄悄失效。
+    ///
+    /// 空值按 `photo` 处理（老数据没有这一列时的合理默认）。
+    pub kind: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
 }
@@ -250,7 +259,7 @@ pub fn resolve_file(dir: &Path, file: &str) -> Option<PathBuf> {
 
 const COLS: &str = "id, file, thumb, width, height, bytes, caption, keywords,
                     sender, channel, person_ids, recall_count, last_recall_ms,
-                    created_ms, updated_ms";
+                    kind, created_ms, updated_ms";
 
 fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageItem> {
     Ok(ImageItem {
@@ -267,8 +276,9 @@ fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageItem> {
         person_ids: r.get(10)?,
         recall_count: r.get(11)?,
         last_recall_ms: r.get(12)?,
-        created_ms: r.get(13)?,
-        updated_ms: r.get(14)?,
+        kind: r.get(13)?,
+        created_ms: r.get(14)?,
+        updated_ms: r.get(15)?,
     })
 }
 

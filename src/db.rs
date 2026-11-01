@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 19;
+pub const SCHEMA_VERSION: i32 = 20;
 
 /// 数据库句柄。
 ///
@@ -277,6 +277,9 @@ impl Db {
             add_column_if_missing(tx, "voice", "deleted_by", "INTEGER")?;
             // 语音内容哈希：同一段文本合成的语音也可能被重复上传。
             add_column_if_missing(tx, "voice", "sha256", "TEXT")?;
+            // 图片用途（emoji/photo）。老库补列后一律为空 = photo，
+            // 也就是「不自动发」——安全的一侧。
+            add_column_if_missing(tx, "image", "kind", "TEXT")?;
 
             // ---------------------------------------------------------- 去重索引
             //

@@ -2731,6 +2731,7 @@ async fn upload_image(
     let mut sender = None;
     let mut channel: Option<String> = None;
     let mut person_ids = None;
+    let mut kind: Option<String> = None;
 
     while let Some(field) = mp
         .next_field()
@@ -2762,6 +2763,17 @@ async fn upload_image(
             "sender" => sender = Some(v),
             "channel" => channel = Some(check_channel(&st, &v)?),
             "person_ids" => person_ids = Some(v),
+            // 这张图是表情包还是普通图。**当场校验**：拼错时静默当成 photo
+            // 会让「自动发图」在闲聊里放出别人的生活照，而那是最难查的一类错。
+            "kind" => {
+                let k = v.to_ascii_lowercase();
+                if k != "emoji" && k != "photo" {
+                    return Err(Error::BadRequest(format!(
+                        "kind 只能是 emoji 或 photo，收到 {v}"
+                    )));
+                }
+                kind = Some(k);
+            }
             // base64 只作 file 的备选：两者都传时以 file 为准
             "base64" if data.is_none() => {
                 let raw = v
@@ -2900,17 +2912,18 @@ async fn upload_image(
     let file_db = file.clone();
     let thumb_db = thumb.clone();
     let sha_db = sha.clone();
+    let kind_db = kind.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         db.with_write(|tx| {
             let now = now_ms();
             tx.execute(
                 "INSERT INTO image(id, file, thumb, width, height, bytes, caption,
-                                   keywords, sender, channel, person_ids,
+                                   keywords, sender, channel, person_ids, kind,
                                    sha256, created_ms, updated_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14)",
                 rusqlite::params![
                     id3, file_db, thumb_db, w, h, bytes, caption, keywords, sender, channel,
-                    person_ids, sha_db, now
+                    person_ids, kind_db, sha_db, now
                 ],
             )?;
             Ok(())
@@ -3044,6 +3057,14 @@ async fn pick_image(
     let mode_out = mode.clone();
     let db = st.db.clone();
     let channel = q.channel.clone();
+    // 只在**对应用途**的图里挑：
+    // · emoji 模式只挑 kind=emoji —— 「发张表情包活跃气氛」绝不能翻出别人的生活照；
+    // · recall 模式只挑 photo（含老数据的空值）—— 「你记得那次湖边吗」要的是真照片，
+    //   表情包在这里是噪音。
+    //
+    // 这条过滤是**功能正确性**，不是优化：没有它，两种意图共用一个池子，
+    // 迟早会在闲聊里发出不该发的图。
+    let want_kind = if mode == "emoji" { "emoji" } else { "photo" };
     let hit = tokio::task::spawn_blocking(move || -> Result<Option<crate::image::ImageItem>> {
         let all = crate::image::list(&db, None, 500)?;
         let mut cands: Vec<crate::image::ImageItem> = all
@@ -3053,6 +3074,11 @@ async fn pick_image(
                     if img.channel.as_deref() != Some(ch) {
                         return false;
                     }
+                }
+                // 老数据 kind 为空 —— 按 photo 处理
+                let k = img.kind.as_deref().unwrap_or("photo");
+                if k != want_kind {
+                    return false;
                 }
                 let kw = img.keywords.clone().unwrap_or_default();
                 kw.split([',', '，', ' ', '、', ';', '；'])

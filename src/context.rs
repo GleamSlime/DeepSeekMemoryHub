@@ -457,36 +457,40 @@ pub fn render_images(rows: &[(Option<String>, Option<String>)]) -> Option<String
     )
 }
 
-/// 「记忆画面」段（**内联 base64**）：匹配到就把图直接给模型看。
+/// 「记忆画面」段：**只写「有这么一张图」，不内联 base64**。
 ///
-/// 用户在 2026-11-01 定的口径：
-/// - 拿**最近几条消息**（不只是当前这句）去匹配关键词；
-/// - 匹配到就**把图本身**放进上下文（多模态模型真能看到），
-///   而不是只说「有这么一张图」。
+/// # 为什么不能把 base64 塞进 system_prompt
 ///
-/// 代价是 token：一张 800px 的图约 1–2k token，所以调用方要限制张数
-/// （默认最多 1 张、单张 ≤ 阈值的才内联，超了退化成「只给描述」）。
+/// 2026-11-01 实测确认：把 `![描述](data:image/png;base64,…)` 拼进
+/// **文本**里，对任何模型都只是**一段乱码字符串** —— 多模态模型的图片
+/// 走的是消息 `content` 数组里的 `{"type":"image_url"}` 结构
+/// （OpenAI 格式），不是文本里的 data URL。
 ///
-/// 格式用 markdown 图片：`![描述](data:image/png;base64,…)`。
-/// 这也是各家常见的多模态输入约定，接入了视觉模型就能直接读。
-pub fn render_images_inline(rows: &[(String, Option<String>, String)]) -> Option<String> {
+/// 所以这里只给**图片 id**，由接入方把它放进自己请求的图片字段：
+/// - AstrBot：`req.image_urls.append("http://hub/v1/image/<id>/file?token=…")`
+/// - 自建：把同样的 URL 放进 `content[].image_url.url`
+///
+/// 代价是多一次 HTTP 取图，但那是**唯一**能让模型真看到图的方式。
+///
+pub fn render_images_ref(rows: &[(String, Option<String>, String)]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
-    for (data_url, caption, keywords) in rows {
-        if data_url.is_empty() {
+    for (id, caption, keywords) in rows {
+        let cap = caption.as_deref().unwrap_or("").trim();
+        let kw = keywords.trim();
+        if cap.is_empty() && kw.is_empty() {
             continue;
         }
-        let cap = caption.as_deref().unwrap_or("").trim();
-        let label = if cap.is_empty() { keywords.trim() } else { cap };
-        let label = if label.is_empty() { "图片" } else { label };
-        // 描述里可能有 `]`，会破坏 markdown 链接语法 —— 换掉
-        let safe = label.replace(['[', ']', '('], " ");
-        lines.push(format!("- ![{safe}]({data_url})"));
+        match (cap.is_empty(), kw.is_empty()) {
+            (false, true) => lines.push(format!("- {cap}（图 id: {id}）")),
+            (true, false) => lines.push(format!("- （一张图，关键词：{kw}）（图 id: {id}）")),
+            _ => lines.push(format!("- {cap}（关键词：{kw}）（图 id: {id}）")),
+        }
     }
     if lines.is_empty() {
         return None;
     }
     Some(format!(
-        "# 你记得的画面\n下面是你说过/见过的图，你能直接看到它们：\n{}",
+        "# 你记得的画面\n这些图你见过、记得内容（要看图得由接入方附上）：\n{}",
         lines.join("\n")
     ))
 }

@@ -4468,7 +4468,7 @@ async fn 被忽视的人发来的图不入库但消息照记() {
 // ================================================================== 画面内联与挑图
 
 #[tokio::test]
-async fn 匹配到就把图以_base64_内联进上下文() {
+async fn 匹配到就把图片引用给接入方() {
     // 用户口径：匹配到则**直接把图放进上下文**（多模态模型真能看到），
     // 不是只告诉它「有这么一张图」。
     let s = TestServer::start().await;
@@ -4487,14 +4487,11 @@ async fn 匹配到就把图以_base64_内联进上下文() {
 
     let j: serde_json::Value = s.get("/v1/context?q=去钓鱼吗").await.json().await.unwrap();
     let text = j["text"].as_str().unwrap();
-    assert!(
-        text.contains("data:image/png;base64,"),
-        "要内联 base64：{text}"
-    );
-    assert!(
-        text.contains("!["),
-        "用 markdown 图片语法（各家多模态的通用约定）：{text}"
-    );
+    // 只给引用（id），不内联 base64 —— 文本里的 data URL 模型只会当乱码。
+    // 真正的附图由接入方做（AstrBot 就是放进 req.image_urls）。
+    assert!(!text.contains("base64"), "不该内联 base64：{text}");
+    assert!(text.contains("图 id: i1"), "要给图片 id：{text}");
+    assert!(text.contains("湖边的鱼"), "描述要在：{text}");
     assert!(j["parts"].as_array().unwrap().iter().any(|p| p == "images"));
 }
 
@@ -4537,7 +4534,7 @@ async fn 最近几条消息命中也能触发画面() {
 }
 
 #[tokio::test]
-async fn 太大的图不内联只记原因() {
+async fn 大图也照样给引用() {
     let s = TestServer::start().await;
     s.db.with_write(|tx| {
         // bytes 超上限（默认 512KB）
@@ -4554,12 +4551,13 @@ async fn 太大的图不内联只记原因() {
     std::fs::write(idir.join("big.png"), tiny_png()).unwrap();
 
     let j: serde_json::Value = s.get("/v1/context?q=钓鱼").await.json().await.unwrap();
+    // 现在只给引用、不读原图 —— 「大」不再是中枢跳过的理由，
+    // 大小判断交给接入方（插件侧有 2MB 上限）。
     assert!(
-        !j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
-        "超上限不该内联"
+        j["parts"].as_array().unwrap().iter().any(|p| p == "images"),
+        "大图也该给引用：{j}"
     );
-    let dropped = j["dropped"].to_string();
-    assert!(dropped.contains("太大"), "要说清为什么没给：{dropped}");
+    assert!(j["text"].as_str().unwrap().contains("图 id: big"));
 }
 
 #[tokio::test]
@@ -4668,4 +4666,37 @@ async fn recall_模式同次数时最近用过的优先() {
         .await
         .unwrap();
     assert_eq!(j["id"], "recent", "同次数时刚用过的更可能是要回忆的：{j}");
+}
+
+#[tokio::test]
+async fn 上下文里只给图片引用不塞_base64() {
+    // 2026-11-01 实测确认：base64 拼进 **system_prompt 文本** 里，
+    // 对任何模型都只是乱码 —— 多模态模型的图走的是消息 content 的
+    // `{"type":"image_url"}` 结构，不是文本里的 data URL。
+    // 所以中枢只给 id，由接入方放进自己的图片字段。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, caption, keywords, created_ms, updated_ms)
+             VALUES ('img-abc','a.png',100,'湖边的鱼','钓鱼,湖边',1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let idir = s.state.cfg.image_dir();
+    std::fs::create_dir_all(&idir).unwrap();
+    std::fs::write(idir.join("a.png"), tiny_png()).unwrap();
+
+    let j: serde_json::Value = s.get("/v1/context?q=去钓鱼吗").await.json().await.unwrap();
+    let text = j["text"].as_str().unwrap();
+    assert!(
+        !text.contains("base64"),
+        "上下文里不该有 base64（模型看不懂）：{text}"
+    );
+    assert!(
+        text.contains("图 id: img-abc"),
+        "要给接入方图片 id，它才能把图附进请求：{text}"
+    );
+    assert!(text.contains("湖边的鱼"), "描述还要在：{text}");
 }

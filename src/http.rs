@@ -1960,9 +1960,7 @@ async fn get_context(
     // 在那里 await 会把线程池的线程挂住。
     let kb_seg = load_kb_segment(&st, &needle).await;
     // 记忆画面内联的两道闸（见 2.3 的注释）。
-    let img_dir = st.cfg.image_dir();
     let img_max = st.cfg.context_image_inline_max;
-    let img_inline_max_bytes = st.cfg.context_image_inline_max_bytes;
 
     // 一次进 `spawn_blocking`：rusqlite 是同步的，且各段之间是**独立的读**，
     // 同一连接上顺序查完比跑 6 次 spawn 便宜得多。
@@ -2032,7 +2030,7 @@ async fn get_context(
             crate::image::mentioned(&db, &probe, img_max)
         }) {
             Ok(rows) => {
-                let mut inline: Vec<(String, Option<String>, String)> = Vec::new();
+                let mut refs: Vec<(String, Option<String>, String)> = Vec::new();
                 for img in &rows {
                     // 进了上下文就算「被想起了一次」
                     let _ = db.with_write(|tx| {
@@ -2044,27 +2042,17 @@ async fn get_context(
                         )?;
                         Ok(())
                     });
-                    // 太大的不内联：一张 2MB 的图会吃掉几千 token，
-                    // 而且基座模型未必吃得下。退化成「只描述」。
-                    if img.bytes > img_inline_max_bytes {
-                        notes.push(format!(
-                            "images: {} 太大（{} 字节 > 上限）未内联，只给描述",
-                            img.id, img.bytes
-                        ));
-                        continue;
-                    }
-                    if let Some(url) = crate::image::to_data_url(&img_dir, img) {
-                        inline.push((
-                            url,
-                            img.caption.clone(),
-                            img.keywords.clone().unwrap_or_default(),
-                        ));
-                    } else {
-                        notes.push(format!("images: {} 原图读不到，未内联", img.id));
-                    }
+                    // 只记引用，不读原图 —— 图片由接入方放进请求的图片字段
+                    // （见 `context::render_images_ref` 的注释：文本里的
+                    //  base64 对模型只是乱码）。
+                    refs.push((
+                        img.id.clone(),
+                        img.caption.clone(),
+                        img.keywords.clone().unwrap_or_default(),
+                    ));
                 }
                 push(
-                    crate::context::render_images_inline(&inline),
+                    crate::context::render_images_ref(&refs),
                     crate::context::SEG_IMAGES,
                 );
             }

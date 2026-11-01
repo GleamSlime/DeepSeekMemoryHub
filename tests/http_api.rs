@@ -4111,3 +4111,41 @@ async fn 特质可以删除并留回滚记录() {
         .unwrap();
     assert_eq!(r.status(), 404);
 }
+
+// ================================================================== 面板能直接 src 的二进制接口
+
+#[tokio::test]
+async fn 面板会话能直接取语音与图片字节() {
+    // 浏览器 `<img src>` / `<audio src>` 发请求时**带不了自定义 header**
+    // （只有 cookie 会自动带上）。这两个接口原来只认 X-API-Token，
+    // 于是面板上图片和试听全是 401 —— 表现为「页面报错 / 一片空白」。
+    let s = TestServer::start().await;
+    s.db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO voice(id, file, bytes, speaker, created_ms, updated_ms)
+             VALUES ('v1','v1.m4a',3,'default',1,1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO image(id, file, bytes, created_ms, updated_ms)
+             VALUES ('i1','i1.png',3,1,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let dir = s.state.cfg.voice_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("v1.m4a"), b"abc").unwrap();
+    let idir = s.state.cfg.image_dir();
+    std::fs::create_dir_all(&idir).unwrap();
+    std::fs::write(idir.join("i1.png"), b"abc").unwrap();
+
+    // 没凭据 → 401
+    assert_eq!(s.get_no_auth("/v1/voice/v1/file").await.status(), 401);
+    assert_eq!(s.get_no_auth("/v1/image/i1/file").await.status(), 401);
+
+    // token 照常能取
+    assert_eq!(s.get("/v1/voice/v1/file").await.status(), 200);
+    assert_eq!(s.get("/v1/image/i1/file").await.status(), 200);
+}

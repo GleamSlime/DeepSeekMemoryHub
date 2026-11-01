@@ -486,7 +486,7 @@ const NAV_GROUPS = [
   {label:'知识库', items:['kb']},
   {label:'规划', items:['plans']},
   {label:'人格', items:['personas','mood','self','relations','traits','promises']},
-  {label:'素材', items:['images','voices','scenes']},
+  {label:'素材', items:['images','voices']},
   {label:'渠道', items:['channels','messages']},
   {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
 ];
@@ -504,9 +504,17 @@ async function loadChannels(){
 const counts = {};
 
 function renderNav(){
+  // 导航项必须在 PAGES 里有定义。少一条定义会让 `p.icon` 抛
+  // 「Cannot read properties of undefined」——整块侧栏都渲染不出来，
+  // 用户看到的就是「页面报错」而不知道错在哪。
+  // 所以这里**跳过**未定义的项并记一条 console.error，让其余导航照常可用。
+  const missing = NAV_GROUPS.flatMap(g => g.items).filter(k => !PAGES[k]);
+  if (missing.length) {
+    console.error('[nav] 这些页面在 NAV_GROUPS 里但 PAGES 没有定义：', missing.join(', '));
+  }
   $('nav').innerHTML = NAV_GROUPS.map(g => `
     <div class="navgrp">${g.label}</div>
-    ${g.items.map(k=>{
+    ${g.items.filter(k=>PAGES[k]).map(k=>{
       const p=PAGES[k], c=counts[k];
       return `<div class="navitem ${state.page===k?'on':''}" data-page="${k}">
         <span class="ico">${p.icon}</span><span>${p.title}</span>
@@ -552,12 +560,22 @@ async function render(){
     if(state.page==='channels') return await renderChannels(c);
     if(state.page==='personas') return await renderPersonas(c);
     if(state.page==='voices') return await renderVoices(c);
-    if(state.page==='scenes') return await renderScenes(c);
     if(state.page==='images') return await renderImages(c);
     // 「配置」也有专用渲染函数。少了这一行它会掉进 renderTable 兜底，
     // 而 renderTable 不认 'settings' —— 于是整页只剩一个空的筛选栏，
     // 用户看到的就是「配置菜单里什么也没有」。
     if(state.page==='settings') return await renderSettings(c);
+    // 走到这里说明这一页没有专用渲染函数，只能靠通用表格。
+    // 但**通用表格只认固定几个表名**：如果连 PAGES 里都没有这一页，
+    // 说明是导航/分派写漏了，直接报出来（不要静默掉进空表格）。
+    if(!PAGES[state.page]){
+      c.innerHTML = `<div class="empty">
+        <div style="color:var(--err);font-weight:600;margin-bottom:8px">
+          页面「${esc(state.page)}」不存在</div>
+        <div class="dim">导航里引用了它，但 PAGES / render() 里没有对应实现。</div>
+      </div>`;
+      return;
+    }
     return await renderTable(c, state.page);
   }catch(e){
     // 渲染错误要连堆栈一起显示：只写「加载失败」会让人以为是网络或后端问题，

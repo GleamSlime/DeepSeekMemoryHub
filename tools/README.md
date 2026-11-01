@@ -57,3 +57,32 @@ node tools/panecheck.mjs     # 26 条，零依赖（node ≥ 18）
 - 新建关系的请求体不带 `scenes`。
 
 > 它**不验视觉效果**（样式、布局、颜色），那是人开浏览器看的事。
+
+## 面板全量判据（`panecheck-all.mjs`）
+
+`:root/tools/panecheck.mjs` 只覆盖关系/身份两页的交互细节。
+这个覆盖**全部导航页**：
+
+```bash
+node tools/panecheck-all.mjs                             # 假数据
+node tools/panecheck-all.mjs --live /tmp/live_data.json  # 用线上真实返回（推荐）
+```
+
+它抓的是三类问题（都真出过）：
+
+| 检查 | 抓什么 | 2026-11-01 的实例 |
+| --- | --- | --- |
+| 导航项 ↔ `PAGES` 一一对应 | 加了导航项没定义页面 | `scenes` 缺失 → 侧栏整块崩 |
+| 每页真渲染 + 关键函数存在 | 分派漏了、函数没写 | 配置页/回放页只剩空壳 |
+| 模拟点击每页可点元素 | 抽屉里的代码抛异常 | `prompt` 未定义、字段名对不上 |
+
+**用线上真实数据跑更有价值**：假数据字段名写错了，页面看不出问题；
+真实数据里字段一改名，「NaN」「undefined」立刻出现在页面上。
+
+拉真实数据：
+
+```bash
+PW=$(cat data/.panel_pw)
+curl -s -c /tmp/s.txt -o /dev/null -X POST -d "user=admin&pass=$PW" localhost:25590/login
+# 然后逐个 /api/admin/* 取出来拼成 JSON（见 AGENTS.md §5.0）
+```

@@ -2704,7 +2704,7 @@ async fn upload_image(
     headers: HeaderMap,
     mut mp: axum::extract::Multipart,
 ) -> ApiResult<serde_json::Value> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
 
     let mut data: Option<Vec<u8>> = None;
     let mut caption = None;
@@ -2852,7 +2852,7 @@ async fn list_image(
     headers: HeaderMap,
     Query(q): Query<ImageListQuery>,
 ) -> ApiResult<Vec<crate::image::ImageItem>> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let query = q.q.clone();
     let limit = q.limit.unwrap_or(100);
@@ -2868,7 +2868,7 @@ async fn get_image(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<crate::image::ImageItem> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let id2 = id.clone();
     let item = tokio::task::spawn_blocking(move || crate::image::get(&db, &id2))
@@ -2999,8 +2999,9 @@ async fn stream_image(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    if check_token(&st, &headers).is_err() {
-        return (StatusCode::UNAUTHORIZED, "需要 token").into_response();
+    // `<img src>` 同样带不了 header —— 见 `stream_voice` 的注释。
+    if check_token_or_session(&st, &headers).is_err() {
+        return (StatusCode::UNAUTHORIZED, "需要登录或 token").into_response();
     }
     image_response(&st, &id, false).await
 }
@@ -3010,8 +3011,9 @@ async fn stream_image_thumb(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    if check_token(&st, &headers).is_err() {
-        return (StatusCode::UNAUTHORIZED, "需要 token").into_response();
+    // `<img src>` 同样带不了 header —— 见 `stream_voice` 的注释。
+    if check_token_or_session(&st, &headers).is_err() {
+        return (StatusCode::UNAUTHORIZED, "需要登录或 token").into_response();
     }
     image_response(&st, &id, true).await
 }
@@ -3030,7 +3032,7 @@ async fn upload_voice(
     headers: HeaderMap,
     mut mp: axum::extract::Multipart,
 ) -> ApiResult<serde_json::Value> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
 
     let mut data: Option<Vec<u8>> = None;
     let mut meta = crate::voice::Meta::default();
@@ -3142,7 +3144,7 @@ async fn list_voice(
     headers: HeaderMap,
     Query(q): Query<VoiceListQuery>,
 ) -> ApiResult<Vec<crate::voice::VoiceItem>> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let only_rated = q.rated.unwrap_or(0) != 0;
     let limit = q.limit.unwrap_or(100);
@@ -3157,7 +3159,7 @@ async fn download_voice(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<crate::voice::VoiceItem> {
-    check_token(&st, &headers)?;
+    check_token_or_session(&st, &headers)?;
     let db = st.db.clone();
     let id2 = id.clone();
     let item = tokio::task::spawn_blocking(move || crate::voice::get(&db, &id2))
@@ -3173,8 +3175,11 @@ async fn stream_voice(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
+    // 面板用 `<audio src>` 直接放它，而浏览器给媒体元素发请求时
+    // **带不了自定义 header**（只有 cookie 会自动带上）。所以这里接受两种凭据：
+    // token（脚本拉文件）或面板会话（人在浏览器里试听）。
     let deny = |code: StatusCode| (code, "无法读取这条语音").into_response();
-    if check_token(&st, &headers).is_err() {
+    if check_token_or_session(&st, &headers).is_err() {
         return deny(StatusCode::UNAUTHORIZED);
     }
     let db = st.db.clone();

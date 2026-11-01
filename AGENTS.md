@@ -104,6 +104,36 @@ git add -A && git commit -m "一句话说清这步做了什么"
 - 提交前 `git status`，把不属于自己的改动单独 commit 或先沟通；
 - 每次提交粒度小，冲突时损失才小。
 
+## 5.0 面板改动的验收（真踩过两次）
+
+前端是**单文件 + 内联脚本**，没有编译期检查、后端测试也覆盖不到。
+已经出过两次「后端全绿、用户打开页面就报错」：
+
+- 2026-10-30：`render()` 漏了 `replay` 分派 → 注入回放页只剩一行计数。
+- 2026-11-01：往导航加了 `scenes` 项却没在 `PAGES` 里定义 →
+  `PAGES[k].icon` 抛 TypeError，**整个侧栏都渲染不出来**。
+
+所以改面板后必须跑：
+
+```bash
+node tools/panecheck-all.mjs                              # 假数据，68 条
+node tools/panecheck-all.mjs --live /tmp/live_data.json   # 真数据（从线上接口拉）
+node tools/panecheck.mjs                                  # 关系/身份的交互细节，34 条
+```
+
+`panecheck-all` 做的事：**每个导航页都真渲染一遍** + 导航项与 `PAGES` 一一对应 +
+**模拟点击每页的可点元素**（行/卡片/按钮）+ 检查关键渲染函数存在。
+`scripts-verify.sh` 的第 6 步已经把它接进来了。
+
+> 写这类判据时最容易犯的错：**重新 parse 一遍 HTML 去点**。
+> 那样拿到的是新对象，页面代码挂在上面的 `onclick` 一个都没有，
+> 于是「点了 0 个元素」而误报通过。必须用页面自己缓存的那批元素。
+
+**另外**：面板用 `<img src>` / `<audio src>` 直接引的接口
+（`/v1/image/{id}/file|/thumb`、`/v1/voice/{id}/file`）
+**必须同时接受会话 cookie** —— 浏览器给媒体元素发请求时带不了自定义 header。
+这类接口统一用 `check_token_or_session`。
+
 ## 5.1 探针数据：写完必须删（真踩过）
 
 2026-11-01 用 `POST /v1/diary {"body":"x"}` 验证接口连通性，忘了删 → 这篇 `x`

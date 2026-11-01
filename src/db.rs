@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 20;
+pub const SCHEMA_VERSION: i32 = 21;
 
 /// 数据库句柄。
 ///
@@ -394,6 +394,8 @@ pub const TABLES: &[&str] = &[
     "persona",
     "voice",
     "image",
+    "generation_log",
+    "gen_state",
     "person",
     "person_account",
     "person_scene",
@@ -541,6 +543,41 @@ CREATE TABLE IF NOT EXISTS image (
   deleted_by  INTEGER
 );
 CREATE INDEX IF NOT EXISTS image_recent ON image(created_ms DESC);
+
+-- 生成记录：每次调 LLM 都留一行（成功也留）。
+--
+-- 为什么要这张表而不是只打日志：
+-- 1. 「日记为什么三天没生成」必须能回答 —— 日志滚没了就再也查不到；
+-- 2. 面板要能显示成功率、耗时、token 花费；
+-- 3. 失败原因要让人看得懂（key 错 / 超时 / 格式不对），而不是只有 exit code。
+CREATE TABLE IF NOT EXISTS generation_log (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  at_ms         INTEGER NOT NULL,
+  -- tick / diary / weekly
+  purpose       TEXT NOT NULL,
+  ok            INTEGER NOT NULL,
+  -- 为什么触发（batch_full/interval/manual）；跳过时是跳过的原因
+  trigger       TEXT,
+  model         TEXT,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  elapsed_ms    INTEGER,
+  -- 成功时的产出摘要（例如「情绪:雀跃 · 手帐 2 条」），面板直接显示
+  result        TEXT,
+  error         TEXT
+);
+CREATE INDEX IF NOT EXISTS gen_log_recent ON generation_log(at_ms DESC);
+CREATE INDEX IF NOT EXISTS gen_log_fail ON generation_log(purpose, at_ms DESC) WHERE ok = 0;
+
+-- 定时任务的水位线：日记/周记最后一次成功生成到哪。
+--
+-- 为什么不复用 `diary` 表反推：生成失败时表里没有新行，
+-- 反推会得出「从没生成过」→ 每次重启都补跑一遍，反复烧钱。
+CREATE TABLE IF NOT EXISTS gen_state (
+  key        TEXT PRIMARY KEY,
+  last_ok_ms INTEGER NOT NULL,
+  updated_ms INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS person_account (
   channel       TEXT NOT NULL,         -- mc / qq / live / system

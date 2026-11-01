@@ -162,6 +162,17 @@ pub struct Config {
     /// 权重模型参数。
     pub weight: WeightConfig,
 
+    /// 中枢自己的 LLM（OpenAI 兼容）。**默认全空 = 不启用**。
+    ///
+    /// 空的时候所有生成任务（日记/周记/手帐/情绪/自我认知）都不跑，
+    /// 行为与本功能上线前**完全一致** —— 不请求、不报错、不建表行。
+    #[serde(default)]
+    pub llm: crate::llm::LlmConfig,
+
+    /// 生成任务的时间与门槛。
+    #[serde(default)]
+    pub generate: crate::generate::GenConfig,
+
     /// 每个连接的请求体上限（字节）。默认 8 MiB。
     pub max_body_bytes: usize,
 
@@ -205,6 +216,8 @@ impl Default for Config {
             context_image_inline_max_bytes: 512 * 1024,
             snapshot_check_seconds: 3600,
             weight: WeightConfig::default(),
+            llm: crate::llm::LlmConfig::default(),
+            generate: crate::generate::GenConfig::default(),
             max_body_bytes: 8 * 1024 * 1024,
             request_timeout_seconds: 30,
             max_concurrency: 4096,

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// LLM 配置。**全部可在面板里改**（参考常见 agent 工具的配置项）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     /// 形如 `https://api.deepseek.com/v1`（**不含** `/chat/completions`）。
     ///
@@ -34,6 +34,24 @@ pub struct LlmConfig {
     /// 失败重试次数（指数退避）。默认 2。
     #[serde(default = "d_retries")]
     pub retries: u32,
+}
+
+/// ⚠️ **必须手写**，不能 `#[derive(Default)]`：
+/// derive 会给所有字段塞零值，把 `#[serde(default = "d_timeout")]` 那些函数
+/// 完全绕过去 —— 结果是「没配过 LLM 时 max_tokens=0、temperature=0」，
+/// 面板上一片零，真跑起来还会因为 max_tokens=0 直接被网关拒。
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            timeout_seconds: d_timeout(),
+            max_tokens: d_max_tokens(),
+            temperature: d_temp(),
+            retries: d_retries(),
+        }
+    }
 }
 
 fn d_timeout() -> u64 {
@@ -306,6 +324,17 @@ mod tests {
             ChatClient::new(mk("http://192.168.1.5:8000")).endpoint(),
             "http://192.168.1.5:8000/chat/completions"
         );
+    }
+
+    #[test]
+    fn 默认值不是零() {
+        // derive(Default) 会绕过 serde 的 default 函数，全给零 —— 真踩过
+        let c = LlmConfig::default();
+        assert_eq!(c.timeout_seconds, 90);
+        assert_eq!(c.max_tokens, 1200);
+        assert!(c.temperature > 0.0, "temperature=0 会让输出千篇一律");
+        assert_eq!(c.retries, 2);
+        assert!(c.base_url.is_empty() && c.model.is_empty());
     }
 
     #[test]

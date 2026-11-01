@@ -474,6 +474,8 @@ const PAGES = {
   personas:  {title:'人格',     icon:'🎭', url:'/api/admin/personas'},
   images:    {title:'记忆画面', icon:'🖼', url:null},
   voices:    {title:'语音库',   icon:'🎙', url:null},
+  llm:       {title:'模型',     icon:'🤖', url:'/api/admin/llm'},
+  genlog:    {title:'生成记录', icon:'📜', url:'/api/admin/generate/log'},
   settings:  {title:'配置',     icon:'🎛', url:'/api/admin/settings'},
   persons:   {title:'身份',     icon:'👥', url:'/api/admin/persons'},
   snapshots: {title:'快照',     icon:'💾', url:'/api/admin/snapshots'},
@@ -488,6 +490,7 @@ const NAV_GROUPS = [
   {label:'人格', items:['personas','mood','self','relations','traits','promises']},
   {label:'素材', items:['images','voices']},
   {label:'渠道', items:['channels','messages']},
+  {label:'生成', items:['llm','genlog']},
   {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
 ];
 
@@ -564,6 +567,8 @@ async function render(){
     // 「配置」也有专用渲染函数。少了这一行它会掉进 renderTable 兜底，
     // 而 renderTable 不认 'settings' —— 于是整页只剩一个空的筛选栏，
     // 用户看到的就是「配置菜单里什么也没有」。
+    if(state.page==='llm') return await renderLlm(c);
+    if(state.page==='genlog') return await renderGenLog(c);
     if(state.page==='settings') return await renderSettings(c);
     // 走到这里说明这一页没有专用渲染函数，只能靠通用表格。
     // 但**通用表格只认固定几个表名**：如果连 PAGES 里都没有这一页，
@@ -2372,6 +2377,163 @@ async function renderReplay(c){
             </div>`).join('')}
         </div>
       </div>`).join('')}`;
+}
+
+// ---------- 模型（LLM 配置）
+//
+// 日记/周记/手帐/情绪/自我认知由中枢自己调模型生成（不再依赖 MC 插件）。
+// 这里配的就是那个模型。
+async function renderLlm(c){
+  const d = await api('/api/admin/llm');
+  const L = d.llm || {}, G = d.generate || {};
+  c.innerHTML = `
+  <p class="dim" style="font-size:12.5px;margin:0 0 16px">
+    中枢用这个模型生成**日记 / 周记 / 手帐 / 情绪 / 自我认知**。
+    没配置时这些功能不跑，其他功能不受影响。
+  </p>
+
+  <div class="card" style="max-width:760px;padding:18px">
+    <div class="sectitle">接口</div>
+    <div class="editrow">
+      <label>Base URL <span class="dim">填到 /v1 为止；整条 chat/completions 也能贴</span></label>
+      <input id="llmBase" value="${esc(L.base_url||'')}" placeholder="https://api.deepseek.com/v1">
+    </div>
+    <div class="editrow">
+      <label>API Key <span class="dim">${L.api_key&&L.api_key.set?'已设置（不回显）':'未设置'}</span></label>
+      <input id="llmKey" type="password" placeholder="${L.api_key&&L.api_key.set?'留空表示不修改':'sk-...'}">
+    </div>
+    <div class="editrow">
+      <label>模型 id</label>
+      <input id="llmModel" value="${esc(L.model||'')}" placeholder="deepseek-chat">
+    </div>
+    <div class="editrow" style="display:flex;gap:14px;flex-wrap:wrap">
+      <label style="flex:1">超时（秒）<input id="llmTimeout" type="number" min="5" max="600" value="${L.timeout_seconds||90}"></label>
+      <label style="flex:1">最大输出 token<input id="llmMax" type="number" min="64" max="8192" value="${L.max_tokens||1200}"></label>
+      <label style="flex:1">温度<input id="llmTemp" type="number" step="0.1" min="0" max="2" value="${L.temperature!=null?L.temperature:0.8}"></label>
+      <label style="flex:1">重试次数<input id="llmRetries" type="number" min="0" max="5" value="${L.retries!=null?L.retries:2}"></label>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px;align-items:center">
+      <button class="primary" id="llmSave">保存</button>
+      <button id="llmTest">测试连接</button>
+      <span id="llmTestOut" class="dim" style="font-size:12.5px"></span>
+    </div>
+  </div>
+
+  <div class="card" style="max-width:760px;padding:18px;margin-top:16px">
+    <div class="sectitle">生成时机</div>
+    <p class="dim" style="font-size:12px;margin:0 0 12px">
+      省请求靠两道闸：<b>最小间隔</b>（不管来多少事件，这么久内最多一次）
+      和<b>攒批</b>（够多可以提前，但仍有 60 秒冷却）。
+      被节流的事件<b>不会丢</b>，下次一起喂。
+    </p>
+    <div class="editrow" style="display:flex;gap:14px;flex-wrap:wrap">
+      <label style="flex:1">两次 tick 最小间隔（秒）<input id="genInterval" type="number" min="60" value="${G.tick_interval_seconds||600}"></label>
+      <label style="flex:1">攒够几条可提前<input id="genBatch" type="number" min="1" value="${G.tick_batch||8}"></label>
+      <label style="flex:1">事件重要度门限<input id="genMinImp" type="number" step="0.05" min="0" max="1" value="${G.tick_min_importance!=null?G.tick_min_importance:0.35}"></label>
+    </div>
+    <div class="editrow" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px">
+      <label style="flex:1">日记（HH:MM，空=关）<input id="genDiary" value="${esc(G.diary_at||'')}" placeholder="04:00"></label>
+      <label style="flex:1">周记（HH:MM）<input id="genWeekly" value="${esc(G.weekly_at||'')}" placeholder="04:30"></label>
+      <label style="flex:1">周记星期（1=周一）<input id="genWeeklyDay" type="number" min="1" max="7" value="${G.weekly_day||1}"></label>
+    </div>
+    <div class="editrow" style="margin-top:10px">
+      <label style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="genEnabled" ${G.tick_enabled?'checked':''} style="width:auto">
+        启用被动 tick（情绪/手帐/自我认知）
+      </label>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px;align-items:center">
+      <button class="primary" id="genSave">保存</button>
+      <button id="genTick">立即跑一次 tick</button>
+      <span id="genTickOut" class="dim" style="font-size:12.5px"></span>
+    </div>
+  </div>`;
+
+  const collect = ()=>({
+    base_url: $('llmBase').value.trim(),
+    api_key: $('llmKey').value.trim() || undefined,
+    model: $('llmModel').value.trim(),
+    timeout_seconds: +$('llmTimeout').value,
+    max_tokens: +$('llmMax').value,
+    temperature: +$('llmTemp').value,
+    retries: +$('llmRetries').value
+  });
+  const collectGen = ()=>({
+    tick_enabled: $('genEnabled').checked,
+    tick_interval_seconds: +$('genInterval').value,
+    tick_batch: +$('genBatch').value,
+    tick_min_importance: +$('genMinImp').value,
+    diary_at: $('genDiary').value.trim(),
+    weekly_at: $('genWeekly').value.trim(),
+    weekly_day: +$('genWeeklyDay').value,
+    write_back: true
+  });
+
+  $('llmSave').onclick=async()=>{
+    try{ await apiDo('POST','/api/admin/llm', collect()); toast('已保存'); render(); }
+    catch(e){ toast('保存失败：'+e.message, true); }
+  };
+  $('genSave').onclick=async()=>{
+    try{ await apiDo('POST','/api/admin/llm', {generate: collectGen()}); toast('已保存'); render(); }
+    catch(e){ toast('保存失败：'+e.message, true); }
+  };
+  $('llmTest').onclick=async()=>{
+    const o=$('llmTestOut'); o.textContent='测试中…'; o.style.color='';
+    try{
+      const r=await apiDo('POST','/api/admin/llm/test');
+      if(r.ok){ o.textContent=`✓ 通（${r.elapsed_ms}ms，回复「${r.reply}」）`; o.style.color='var(--ok)'; }
+      else { o.textContent='✗ '+r.error; o.style.color='var(--err)'; }
+    }catch(e){ o.textContent='✗ '+e.message; o.style.color='var(--err)'; }
+  };
+  $('genTick').onclick=async()=>{
+    const o=$('genTickOut'); o.textContent='跑一次大约要几秒…'; o.style.color='';
+    try{
+      const r=await apiDo('POST','/api/admin/generate/tick');
+      const x=r.result||{};
+      o.textContent = x.ran
+        ? `✓ 跑了 ${x.elapsed_ms}ms：情绪「${x.mood}」· 手帐 ${x.journals} 条${x.self_updated?' · 自我认知已更新':''}`
+        : `未运行：${x.why}`;
+      o.style.color = x.ran ? 'var(--ok)' : 'var(--dim)';
+    }catch(e){ o.textContent='✗ '+e.message; o.style.color='var(--err)'; }
+  };
+}
+
+// ---------- 生成记录
+async function renderGenLog(c){
+  const d = await api('/api/admin/generate/log?limit=60');
+  const items = d.items || [];
+  const fails = d.consecutive_failures || {};
+  const ts = d.tick_state || {};
+  const bad = Object.entries(fails).filter(([,v])=>v>0);
+  const label = {tick:'感知 tick', diary:'日记', weekly:'周记'};
+
+  c.innerHTML = `
+  ${bad.length?`<div class="card" style="border-color:var(--err);padding:12px 16px;margin-bottom:14px">
+    <b style="color:var(--err)">连续失败</b>
+    ${bad.map(([k,v])=>`<span style="margin-left:12px">${esc(label[k]||k)}：<b>${v}</b> 次</span>`).join('')}
+    <div class="dim" style="font-size:12px;margin-top:6px">
+      去「模型」页点「测试连接」看具体错误（key 失效 / 地址不对 / 模型名错）。
+    </div>
+  </div>`:''}
+  <p class="dim" style="font-size:12.5px;margin:0 0 14px">
+    每次调模型都留一行（成功也留）。<b>为什么没生成</b>也在里面 ——
+    <code>trigger</code> 是跳过原因（<code>too_soon</code>/<code>nothing_new</code>/<code>disabled</code>）
+    或触发原因（<code>batch_full</code>/<code>interval</code>/<code>manual</code>/<code>schedule</code>）。
+    ${ts.pending!=null?` 当前攒了 <b>${ts.pending}</b> 条待处理。`:''}
+  </p>
+  ${items.length?`<div class="tablewrap"><table><thead><tr>
+    <th>时间</th><th>任务</th><th>结果</th><th>触发/跳过</th><th class="num">耗时</th>
+    <th class="num">token</th><th>内容</th></tr></thead>
+  <tbody>${items.map(r=>`<tr>
+    <td class="mono dim nowrap">${fmtTime(r.at_ms)}</td>
+    <td>${esc(label[r.purpose]||r.purpose)}</td>
+    <td>${r.ok?'<span class="badge b-ok">成功</span>':'<span class="badge b-err">失败</span>'}</td>
+    <td class="mono dim">${esc(r.trigger||'—')}</td>
+    <td class="num mono">${r.elapsed_ms!=null?r.elapsed_ms+'ms':'—'}</td>
+    <td class="num mono dim">${r.prompt_tokens||r.completion_tokens?`${r.prompt_tokens||0}/${r.completion_tokens||0}`:'—'}</td>
+    <td>${r.ok?esc(r.result||'—'):`<span style="color:var(--err)">${esc((r.error||'').slice(0,80))}</span>`}</td>
+  </tr>`).join('')}</tbody></table></div>`
+  :'<div class="empty">还没有生成记录。配好模型后，到点（或点「立即跑一次」）就会有。</div>'}`;
 }
 
 // ---------- 配置

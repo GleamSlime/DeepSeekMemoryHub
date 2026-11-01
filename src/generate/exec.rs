@@ -50,21 +50,12 @@ pub async fn run_tick(
 
     let reason = match decision {
         Decision::Skip(s) => {
-            // 跳过也记账：排错时能回答「为什么没生成」
-            runner::log(
-                db,
-                Record {
-                    purpose: Purpose::Tick,
-                    ok: true,
-                    trigger: s.as_str(),
-                    model: &cfg.llm.model,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    elapsed_ms: 0,
-                    result: Some("跳过".into()),
-                    error: None,
-                },
-            );
+            // **跳过不记账**：tick 每 60 秒检查一次，每次都写一行的话
+            // 一天 1440 行纯噪声，会把真正有价值的记录（尤其失败）淹掉 ——
+            // `gen_log_fail` 那个索引就是为「找失败」建的。
+            // 跳过原因打 trace 日志；面板上的「为什么没生成」由
+            // `tick_state` 的 pending / last_run 回答。
+            tracing::debug!("tick 跳过：{}", s.as_str());
             return Ok(TickSummary {
                 ran: false,
                 why: s.as_str().into(),
@@ -75,14 +66,21 @@ pub async fn run_tick(
     };
 
     // ---- 2. 采输入
-    let since = {
+    //
+    // 窗口起点有两个来源，取**较新的那个**：
+    // - 节流器的水位线（本次进程内跑过 tick，就只看它之后的）；
+    // - `gen_state` 里存的持久水位线（重启后接着跑，不重吃已处理过的）。
+    //
+    // 为什么需要持久水位线：`Throttle` 在内存里，重启就归零 ——
+    // 没有它的话每次重启都会把过去 6 小时重吃一遍（真实花费）。
+    let mem_wm = {
         let t = state.throttle.lock().unwrap_or_else(|e| e.into_inner());
-        // 从没跑过就用 6 小时窗口：跑太远会把几天的东西一次灌进去
-        if t.watermark_ms() > 0 {
-            t.watermark_ms()
-        } else {
-            now - 6 * 3_600_000
-        }
+        t.watermark_ms()
+    };
+    let disk_wm = runner::state_get(db, "tick_watermark").unwrap_or(0);
+    let since = match (mem_wm, disk_wm) {
+        (0, 0) => now - 6 * 3_600_000, // 从没跑过：6 小时窗口
+        (a, b) => a.max(b),
     };
     let input = crate::generate::collect::gather(
         db,
@@ -136,6 +134,11 @@ pub async fn run_tick(
                 let mut t = state.throttle.lock().unwrap_or_else(|e| e.into_inner());
                 t.mark_run(now);
             }
+            // 持久水位线：重启后不重吃已经处理过的事件。
+            //
+            // **只在成功时推进** —— 失败时下次要重试同一段，
+            // 推进了就等于把它悄悄丢了。
+            runner::state_set(db, "tick_watermark", now);
             let summary = format!(
                 "情绪:{} · 手帐 {} 条{}",
                 out.mood.label,
@@ -207,4 +210,78 @@ pub struct TickSummary {
     pub journals: usize,
     pub self_updated: bool,
     pub elapsed_ms: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with_llm() -> crate::config::Config {
+        let mut c = crate::config::Config::default();
+        c.llm.base_url = "http://127.0.0.1:1/v1".into();
+        c.llm.api_key = "k".into();
+        c.llm.model = "m".into();
+        c.llm.retries = 0;
+        c.llm.timeout_seconds = 5;
+        c
+    }
+
+    /// LLM 明显连不上时：要记失败、**不推进水位线**、也不 panic。
+    #[tokio::test]
+    async fn 失败时不推进水位线以便重试() {
+        let (db, _g) = crate::generate::runner::tests_support::fresh_db();
+        let cfg = cfg_with_llm();
+        let state = TickState::default();
+
+        // 造一条够格的事件，否则会因为「没新东西」提前返回
+        db.with_write(|tx| {
+            tx.execute(
+                "INSERT INTO event(at_ms, kind, channel, summary, importance, scope)
+                 VALUES (?1,'died','mc','被砸死',0.9,'companion')",
+                rusqlite::params![crate::db::now_ms()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let r = run_tick(&db, &cfg, &state, true).await.unwrap();
+        assert!(!r.ran, "连不上就该失败：{r:?}");
+        assert!(
+            crate::generate::runner::state_get(&db, "tick_watermark").is_none(),
+            "失败了不能推进水位线，否则这段事件被悄悄丢掉"
+        );
+
+        // 但失败要留下记录
+        let rows = crate::generate::runner::recent(&db, 5).unwrap();
+        assert!(rows.iter().any(|r| !r.ok), "失败必须入库：{rows:?}");
+        assert!(
+            crate::generate::runner::consecutive_failures(&db, Purpose::Tick) >= 1,
+            "连续失败数要能算出来（面板红点用）"
+        );
+    }
+
+    /// 没有新东西时不该白花一次请求。
+    #[tokio::test]
+    async fn 没新东西就不调用() {
+        let (db, _g) = crate::generate::runner::tests_support::fresh_db();
+        let cfg = cfg_with_llm();
+        // 把水位线推到「现在之后」→ 没有任何事件在窗口里
+        crate::generate::runner::state_set(&db, "tick_watermark", crate::db::now_ms() + 60_000);
+        let state = TickState::default();
+        let r = run_tick(&db, &cfg, &state, false).await.unwrap();
+        assert!(!r.ran);
+        assert_eq!(r.why, "nothing_new");
+    }
+
+    /// 关掉 tick 就该完全不动。
+    #[tokio::test]
+    async fn 关掉就不跑() {
+        let (db, _g) = crate::generate::runner::tests_support::fresh_db();
+        let mut cfg = cfg_with_llm();
+        cfg.generate.tick_enabled = false;
+        let state = TickState::default();
+        let r = run_tick(&db, &cfg, &state, false).await.unwrap();
+        assert!(!r.ran);
+        assert_eq!(r.why, "disabled");
+    }
 }

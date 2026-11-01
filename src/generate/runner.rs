@@ -119,7 +119,7 @@ pub fn consecutive_failures(db: &Db, purpose: Purpose) -> i64 {
 }
 
 /// 面板要显示的一行。
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct GenLogRow {
     pub id: i64,
     pub at_ms: i64,

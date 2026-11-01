@@ -52,6 +52,26 @@ const DATA = {
     { tag: 'mc', label: 'Minecraft', trust: 1, builtin: true, events: 5 },
     { tag: 'qq', label: 'QQ', trust: 0.9, builtin: true, events: 3 },
   ],
+  'api/admin/llm': {
+    llm: { base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
+           timeout_seconds: 90, max_tokens: 1200, temperature: 0.8, retries: 2,
+           api_key: { secret: true, set: true }, ready: true },
+    generate: { tick_enabled: true, tick_interval_seconds: 600, tick_batch: 8,
+                tick_min_importance: 0.35, diary_at: '04:00', weekly_at: '04:30',
+                weekly_day: 1, write_back: true },
+  },
+  'api/admin/generate/log': {
+    items: [
+      { id: 1, at_ms: 1, purpose: 'tick', ok: true, trigger: 'batch_full',
+        model: 'deepseek-chat', prompt_tokens: 1200, completion_tokens: 300,
+        elapsed_ms: 6700, result: '情绪:平静 · 手帐 3 条', error: null },
+      { id: 2, at_ms: 2, purpose: 'diary', ok: false, trigger: 'schedule',
+        model: 'deepseek-chat', prompt_tokens: 0, completion_tokens: 0,
+        elapsed_ms: 500, result: null, error: '401 鉴权失败' },
+    ],
+    consecutive_failures: { tick: 0, diary: 2, weekly: 0 },
+    tick_state: { pending: 3, last_run_ms: 1 },
+  },
   'api/admin/personas': [
     { id: 'per1', name: 'flash 版', model_regex: 'deepseek.*flash', body: '你是小模型版。',
       priority: 10, enabled: true, note: null, created_ms: 1, updated_ms: 1, regex_ok: true },

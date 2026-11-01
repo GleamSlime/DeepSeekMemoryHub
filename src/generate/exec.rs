@@ -136,6 +136,7 @@ pub async fn run_tick(
         Ok(out) => {
             let mut journals = 0usize;
             let mut self_updated = false;
+            let mut rel_changed = 0usize;
             if g.write_back {
                 if let Err(e) = crate::generate::collect::write_mood(db, &out.mood) {
                     tracing::warn!("写情绪失败：{e}");
@@ -144,6 +145,15 @@ pub async fn run_tick(
                     match crate::generate::collect::write_journal(db, j, "system") {
                         Ok(_) => journals += 1,
                         Err(e) => tracing::warn!("写手帐失败：{e}"),
+                    }
+                }
+                // 关系增量：用户口径是「和情绪一起，走触发式，但不衰减」——
+                // 所以这里只吃模型显式给出的那点，没有任何按时间打折的逻辑。
+                for d in &out.relations {
+                    match crate::generate::collect::apply_relation_delta(db, d) {
+                        Ok(true) => rel_changed += 1,
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!("写关系失败：{e}"),
                     }
                 }
                 if let Some(n) = out.self_narrative.as_deref() {
@@ -195,6 +205,7 @@ pub async fn run_tick(
                 mood: Some(out.mood.label),
                 journals,
                 self_updated,
+                relations: rel_changed,
                 elapsed_ms: elapsed,
             })
         }
@@ -233,6 +244,8 @@ pub struct TickSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mood: Option<String>,
     pub journals: usize,
+    /// 这次变了几个人（增量非零的）。
+    pub relations: usize,
     pub self_updated: bool,
     pub elapsed_ms: i64,
 }

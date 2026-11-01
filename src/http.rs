@@ -889,6 +889,21 @@ async fn post_event(
     // 「我明天可能去看看」记成义务。
     let detected_promise = crate::promise_detect::detect(&summary, now_ms());
 
+    // 首次接触就建关系。
+    //
+    // 之前关系只有「有人手动建」或「MC 推动既有关系」两条路，
+    // 而 MC 那边是 `if (rel != null)` —— 关系不存在就永远建不起来。
+    // 实测 2026-11-01：person 有 5 个，relation 只有 1 条。
+    //
+    // 这里补上：**有身份的人在它身上第一次发生事件时**，建一条低值关系。
+    // 值给得很保守（熟悉 1 / 信任 0 / 亲密 5 = 「陌生」档），
+    // 之后靠 tick 的增量慢慢涨 —— 关系不该一夜之间变熟。
+    if let Some(pid) = body.person_id.as_deref().filter(|s| !s.is_empty()) {
+        if let Err(e) = crate::generate::collect::ensure_relation(&st.db, pid) {
+            tracing::warn!("补建关系失败（不影响写入）：{e}");
+        }
+    }
+
     let at = body.at_ms.unwrap_or_else(now_ms);
     let scope = Scope::parse(&body.scope);
     // 承诺要挂到人身上，而 body 稍后会被 move 进闭包 —— 提前取出来。

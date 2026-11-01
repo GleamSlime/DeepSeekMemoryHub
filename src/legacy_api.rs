@@ -630,6 +630,18 @@ async fn post_message(
     //
     // 被拦的是另外两处：`on_group_sync` 里 stop_event（不回复），
     // 和 `/v1/image` 上传时跳过（图会被检索进上下文，那才是「处理」）。
+    // 首次接触建关系（与 `post_event` 同一套口径）。
+    //
+    // 群聊是关系的主要来源 —— 只在事件路径建的话，
+    // 「只在群里聊过、没在 MC 里遇到过」的人永远不会有关系。
+    if let Some(acc) = m.account.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Ok(Some(pid)) = crate::query::person_by_account(&st.db, &m.channel, acc) {
+            if let Err(e) = crate::generate::collect::ensure_relation(&st.db, &pid) {
+                tracing::warn!("补建关系失败（不影响写入）：{e}");
+            }
+        }
+    }
+
     let db = st.db.clone();
     // 空串 message_id 必须归一成 NULL：`channel_message` 上有
     // `UNIQUE(channel, message_id) WHERE message_id IS NOT NULL`，

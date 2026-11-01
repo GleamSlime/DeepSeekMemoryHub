@@ -26,9 +26,11 @@ pub fn gather(
     let talks = recent_talks(db, since_ms, max_talks)?;
     let (mood_label, mv, ma, mi) = current_mood(db)?;
     let self_narrative = current_self(db)?;
+    let relations = gather_relations(db, since_ms)?;
     Ok(TickInput {
         events,
         talks,
+        relations,
         mood_label,
         mood_valence: mv,
         mood_arousal: ma,
@@ -190,6 +192,153 @@ fn _fmt(ms: i64) -> String {
     let days = secs.div_euclid(86400);
     let (y, m, d) = crate::generate::runner::civil_from_days_pub(days);
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// 收集「这次在场的人」及其当前关系。
+///
+/// 「在场」的判据：窗口内有发言，或者有关系记录且最近见过。
+/// 没有这层的话模型只能凭摘要猜谁重要，而那正是关系乱涨的来源。
+fn gather_relations(db: &Db, since_ms: i64) -> Result<Vec<crate::generate::tick::TickRelation>> {
+    use std::collections::HashMap;
+    // 窗口里每个人说了几句（参与度的直接证据，比"提到名字"可靠）
+    let said: HashMap<String, usize> = db.with_read(|c| {
+        let mut stmt = c.prepare(
+            "SELECT account, COUNT(*) FROM channel_message
+             WHERE deleted_by IS NULL AND at_ms > ?1
+             GROUP BY account",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![since_ms], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    r.get::<_, i64>(1)? as usize,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().collect())
+    })?;
+
+    db.with_read(|c| {
+        // 取所有已建立关系的人（关系只在首次接触时建，建了就一直在）
+        let mut stmt = c.prepare(
+            "SELECT r.person_id, p.display_name, r.familiarity, r.trust, r.closeness
+             FROM relation r
+             JOIN person p ON p.person_id = r.person_id
+             ORDER BY r.closeness DESC, r.person_id ASC",
+        )?;
+        let mut out = Vec::new();
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (pid, name, fam, trust, close) = row?;
+            // 这个人的账号（用来对上发言数）
+            let n = db
+                .with_read(|c2| {
+                    let mut st = c2.prepare(
+                        "SELECT account FROM person_account
+                         WHERE person_id = ?1 AND channel = 'qq'",
+                    )?;
+                    let accts: Vec<String> = st
+                        .query_map(rusqlite::params![&pid], |r| r.get::<_, String>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    Ok(accts.iter().filter_map(|a| said.get(a)).sum::<usize>())
+                })
+                .unwrap_or(0);
+            out.push(crate::generate::tick::TickRelation {
+                person_id: pid,
+                display_name: name,
+                familiarity: fam,
+                trust,
+                closeness: close,
+                said: n,
+            });
+        }
+        Ok(out)
+    })
+}
+
+/// 给「有身份但还没关系」的人补建初始关系。
+///
+/// # 为什么需要这一步
+///
+/// 2026-11-01 查出来：`relation` 表**只有 1 条**，而 `person` 有 5 个。
+/// 原因在 MC 侧 —— `Affect.fire()` 里是
+///
+/// ```java
+/// var rel = repo.relation(companion, playerUuid);
+/// if (rel != null) { ... }        // 关系不存在就直接跳过
+/// ```
+///
+/// 全项目只有那一处调 `upsertRelation`，所以**关系永远建不起来**。
+/// 而群聊里的人连 MC 都不经过，更不可能有关系。
+///
+/// 现在由中枢补：第一次在该人身上发生事件时建一条低值关系。
+pub fn ensure_relation(db: &Db, person_id: &str) -> Result<bool> {
+    if person_id.trim().is_empty() {
+        return Ok(false);
+    }
+    let now = crate::db::now_ms();
+    db.with_write(|tx| {
+        // 只在**已有身份**时补：没有 person 行就不该凭空建关系
+        let has: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM person WHERE person_id = ?1",
+            rusqlite::params![person_id],
+            |r| r.get(0),
+        )?;
+        if has == 0 {
+            return Ok(false);
+        }
+        let n = tx.execute(
+            "INSERT INTO relation(person_id, familiarity, trust, closeness,
+                                  first_met_ms, last_met_ms, note)
+             VALUES (?1, 1, 0, 5, ?2, ?2, '自动建立（首次接触）')
+             ON CONFLICT(person_id) DO UPDATE SET last_met_ms = ?2",
+            rusqlite::params![person_id, now],
+        )?;
+        Ok(n > 0)
+    })
+}
+
+/// 应用模型给的关系增量。
+///
+/// **只加不减到 0 以下**（clamp 0..100），且**不衰减** ——
+/// 用户明确要求「不走降低衰减」：关系不该因为「最近没怎么聊」自己掉，
+/// 只有具体的事（被冒犯、被欺骗）才会让它降，而那由模型显式给出负增量。
+pub fn apply_relation_delta(db: &Db, d: &crate::generate::tick::RelationDelta) -> Result<bool> {
+    if d.familiarity == 0 && d.trust == 0 && d.closeness == 0 {
+        return Ok(false);
+    }
+    let now = crate::db::now_ms();
+    db.with_write(|tx| {
+        let n = tx.execute(
+            "UPDATE relation SET
+               familiarity = MIN(100, MAX(0, familiarity + ?1)),
+               trust       = MIN(100, MAX(0, trust + ?2)),
+               closeness   = MIN(100, MAX(0, closeness + ?3)),
+               last_met_ms = ?4
+             WHERE person_id = ?5",
+            rusqlite::params![d.familiarity, d.trust, d.closeness, now, d.person_id],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
+        // 变化要能解释：面板上点开一个人能看到「为什么涨了」
+        if !d.reason.trim().is_empty() {
+            let _ = tx.execute(
+                "INSERT INTO affect_log(at_ms, person_id, kind, field, delta, reason)
+                 VALUES (?1, ?2, 'relation', 'closeness', ?3, ?4)",
+                rusqlite::params![now, d.person_id, d.closeness, d.reason],
+            );
+        }
+        Ok(true)
+    })
 }
 
 fn recent_events(
@@ -482,6 +631,169 @@ mod tests {
             !miss.contains(&((today - 1) * 86_400_000)),
             "昨天有，不该算缺"
         );
+    }
+
+    fn add_person(db: &Db, pid: &str, name: &str) {
+        db.with_write(|tx| {
+            tx.execute(
+                "INSERT INTO person(person_id, display_name, status, created_ms, ignored)
+                 VALUES (?1, ?2, 'confirmed', 1, 0)",
+                rusqlite::params![pid, name],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn 首次接触自动建关系_且给低值() {
+        // 回归：2026-11-01 实测 person 有 5 个而 relation 只有 1 条 ——
+        // MC 侧 `if (rel != null)` 导致关系永远建不起来。
+        let (db, _g) = tmp_db();
+        add_person(&db, "p1", "姆姆");
+        assert!(ensure_relation(&db, "p1").unwrap());
+        let (f, t, c): (i64, i64, i64) = db
+            .with_read(|c2| {
+                Ok(c2.query_row(
+                    "SELECT familiarity, trust, closeness FROM relation WHERE person_id='p1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!((f, t, c), (1, 0, 5), "初始应该是「陌生」档，不是一上来就熟");
+    }
+
+    #[test]
+    fn 重复接触不重置关系() {
+        let (db, _g) = tmp_db();
+        add_person(&db, "p1", "姆姆");
+        ensure_relation(&db, "p1").unwrap();
+        // 涨到 50
+        db.with_write(|tx| {
+            tx.execute(
+                "UPDATE relation SET closeness = 50 WHERE person_id='p1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        // 再「首次接触」一次
+        ensure_relation(&db, "p1").unwrap();
+        let c: i64 = db
+            .with_read(|c2| {
+                Ok(c2.query_row(
+                    "SELECT closeness FROM relation WHERE person_id='p1'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(c, 50, "已存在的关系不该被重置成 5");
+    }
+
+    #[test]
+    fn 没有身份的人不建关系() {
+        let (db, _g) = tmp_db();
+        assert!(!ensure_relation(&db, "不存在的人").unwrap());
+    }
+
+    #[test]
+    fn 关系增量上下有界且不衰减() {
+        let (db, _g) = tmp_db();
+        add_person(&db, "p1", "姆姆");
+        ensure_relation(&db, "p1").unwrap();
+        db.with_write(|tx| {
+            tx.execute(
+                "UPDATE relation SET closeness = 99 WHERE person_id='p1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // 加 3 封顶 100（不越界）
+        let d = crate::generate::tick::RelationDelta {
+            person_id: "p1".into(),
+            familiarity: 3,
+            trust: 3,
+            closeness: 3,
+            reason: "一起盖房子".into(),
+        };
+        assert!(apply_relation_delta(&db, &d).unwrap());
+        let (f, c): (i64, i64) = db
+            .with_read(|c2| {
+                Ok(c2.query_row(
+                    "SELECT familiarity, closeness FROM relation WHERE person_id='p1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(c, 100, "封顶 100");
+        assert_eq!(f, 4, "1 + 3");
+
+        // **零增量不写库**：绝大多数 tick 应该什么都不改
+        let zero = crate::generate::tick::RelationDelta {
+            person_id: "p1".into(),
+            familiarity: 0,
+            trust: 0,
+            closeness: 0,
+            reason: String::new(),
+        };
+        assert!(
+            !apply_relation_delta(&db, &zero).unwrap(),
+            "零增量不该算变更"
+        );
+
+        // **负增量能降，但不会低于 0**
+        db.with_write(|tx| {
+            tx.execute("UPDATE relation SET closeness = 2 WHERE person_id='p1'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let neg = crate::generate::tick::RelationDelta {
+            person_id: "p1".into(),
+            familiarity: -5,
+            trust: -5,
+            closeness: -5,
+            reason: "被冒犯".into(),
+        };
+        apply_relation_delta(&db, &neg).unwrap();
+        let (f2, c2v): (i64, i64) = db
+            .with_read(|r| {
+                Ok(r.query_row(
+                    "SELECT familiarity, closeness FROM relation WHERE person_id='p1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(f2, 0, "降到 0 就不动了");
+        assert_eq!(c2v, 0);
+    }
+
+    #[test]
+    fn 关系不会因为时间流逝自己掉() {
+        // 用户明确要求「不走降低衰减」：淡了也不扣分。
+        // 这条测试钉住：把 last_met 推到很久以前，值不变。
+        let (db, _g) = tmp_db();
+        add_person(&db, "p1", "姆姆");
+        ensure_relation(&db, "p1").unwrap();
+        db.with_write(|tx| {
+            tx.execute(
+                "UPDATE relation SET closeness = 60, familiarity = 40, last_met_ms = 1000
+                 WHERE person_id='p1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        // 采集（会算 stage 等）之后值应该原样
+        let rels = gather_relations(&db, 0).unwrap();
+        let r = rels.iter().find(|x| x.person_id == "p1").unwrap();
+        assert_eq!(r.closeness, 60, "不该因时间久了自己掉");
+        assert_eq!(r.familiarity, 40);
     }
 
     #[test]

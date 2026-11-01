@@ -793,6 +793,23 @@ pub fn is_ignored(db: &Db, channel: &str, account: &str) -> Result<bool> {
     })
 }
 
+/// 按「渠道 + 账号」查这个人的 person_id。找不到返回 `None`。
+///
+/// 与 `is_ignored` 同一张表，但用途不同：那个回答「要不要理他」，
+/// 这个回答「他是谁」。两者分开写是因为调用方的语义完全不同 ——
+/// 混在一个返回值里早晚有人用错。
+pub fn person_by_account(db: &Db, channel: &str, account: &str) -> Result<Option<String>> {
+    db.with_read(|c| {
+        Ok(c.query_row(
+            "SELECT person_id FROM person_account
+             WHERE channel = ?1 AND account = ?2 LIMIT 1",
+            rusqlite::params![channel, account],
+            |r| r.get::<_, String>(0),
+        )
+        .ok())
+    })
+}
+
 /// 按 `person_id` 查是否被忽视（面板与内部调用用）。
 pub fn person_ignored(db: &Db, person_id: &str) -> Result<bool> {
     db.with_read(|c| {

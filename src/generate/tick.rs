@@ -40,6 +40,8 @@ pub struct TickInput {
     pub mood_intensity: f64,
     /// 当前自我认知（让模型在此基础上「微调」而不是每次重写）。
     pub self_narrative: Option<String>,
+    /// 在场的人及其当前关系。模型据此**小幅**调整，而不是凭空打分。
+    pub relations: Vec<TickRelation>,
     /// 距上次 tick 多久（秒）。让模型知道「这是一天的总结」还是「刚过十分钟」。
     pub since_last_seconds: i64,
 }
@@ -51,6 +53,18 @@ pub struct TickEvent {
     pub kind: String,
     pub summary: String,
     pub importance: f64,
+}
+
+/// 一个人当前的关系状态（给模型做增量参考）。
+#[derive(Debug, Clone)]
+pub struct TickRelation {
+    pub person_id: String,
+    pub display_name: String,
+    pub familiarity: i64,
+    pub trust: i64,
+    pub closeness: i64,
+    /// 这次对话里他说了几句话（参与度的直接证据）。
+    pub said: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +85,32 @@ pub struct TickOutput {
     /// 只在自我认知确实需要更新时才给；`null` = 不用动。
     #[serde(default)]
     pub self_narrative: Option<String>,
+    /// 关系变化（**增量**，不是绝对值）。
+    ///
+    /// 为什么要增量而不是绝对值：模型看不到完整的历史，
+    /// 让它给绝对值就会出现「昨天 60 今天 20」的漂移。
+    /// 增量则天然有界：一次最多 +3，想刷也刷不动。
+    #[serde(default)]
+    pub relations: Vec<RelationDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RelationDelta {
+    /// 模型经常只给数字不给 id（实测踩过：整个 tick 因此解析失败，
+    /// 连情绪和手帐一起丢了）。所以这里给默认空串，解析后再**过滤掉**
+    /// 认不出人的条目 —— 少一条关系增量，远好过整次调用作废。
+    #[serde(default)]
+    pub person_id: String,
+    /// 每次增量都在 `-5..=5` 内（解析时再夹一次）。
+    #[serde(default)]
+    pub familiarity: i64,
+    #[serde(default)]
+    pub trust: i64,
+    #[serde(default)]
+    pub closeness: i64,
+    /// 为什么变（一句话，写进面板让关系变化可解释）。
+    #[serde(default)]
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,8 +181,28 @@ const SYSTEM: &str = r#"你是「蓝鲸记忆中枢」的内部整理器，负�
    - 只有当最近的经历确实改变了「我是谁 / 我在意什么」时才给一句新表述。
    - 它要能覆盖旧的，而不是叠加；一句话，30 字以内。
 
-只输出 JSON，形如：
-{"mood":{"label":"平静","valence":0.05,"arousal":0.3,"dominance":0.0,"reason":"普通闲聊"},"journal":[],"self_narrative":null}"#;
+4. **relations** —— 在场人的关系变化（**增量**）。
+   - **每条必须带 `person_id`**，值从上面「在场的人」那份清单里**原样抄**，
+     不要自己编、不要漏。格式像 `img-…` 或 `p-…` 那种字符串。
+   - 只给**这次真的变了**的人；没变化的人不要出现（给空数组）。
+   - 三个维度，每次增量都在 **-3 到 +3** 之间，绝大多数情况应该是 0 或 1：
+     - `familiarity`（熟悉度）：见面、聊过天就会慢慢涨
+     - `trust`（信任）：被托付事、对方守约、说到做到 → 涨；被欺骗、被放鸽子 → 降
+     - `closeness`（亲密）：一起经历了什么、被关心 → 涨；被冷落、被冒犯 → 降
+   - **不要因为对方说了句好话就给高分**。普通闲聊 familiarity +1 到顶，
+     trust/closeness 基本不动。
+   - 只有**真的发生了什么**（一起扛过事、被真诚对待、被伤害）才动 trust/closeness。
+   - 关系**不会自动衰减**：淡了也不扣分，除非发生了具体的事。
+
+只输出 JSON。没事时的形状：
+{"mood":{"label":"平静","valence":0.05,"arousal":0.3,"dominance":0.0,"reason":"普通闲聊"},
+ "journal":[],"self_narrative":null,"relations":[]}
+
+有人真的帮了大忙时的形状（注意 person_id 要从清单原样抄）：
+{"mood":{"label":"雀跃","valence":0.4,"arousal":0.5,"dominance":0.1,"reason":"有人帮我搭了机器"},
+ "journal":[{"kind":"met","summary":"鸡蛋大人帮我搭好刷铁机","importance":0.7}],
+ "self_narrative":null,
+ "relations":[{"person_id":"p-1a192349897","familiarity":1,"trust":2,"closeness":1,"reason":"他主动帮我搭了刷铁机还出了材料"}]}"#;
 
 /// 跑一次 tick。
 pub async fn run(client: &ChatClient, input: &TickInput) -> Result<TickOutput> {
@@ -186,6 +246,16 @@ pub fn render_input(i: &TickInput) -> String {
                 e.kind,
                 one_line(&e.summary, 120),
                 e.importance
+            ));
+        }
+    }
+
+    if !i.relations.is_empty() {
+        s.push_str("\n## 在场的人（当前关系）\n");
+        for r in &i.relations {
+            s.push_str(&format!(
+                "- {}（id: {}）熟悉 {} / 信任 {} / 亲密 {}，这次说了 {} 句\n",
+                r.display_name, r.person_id, r.familiarity, r.trust, r.closeness, r.said
             ));
         }
     }
@@ -243,6 +313,16 @@ pub fn parse(text: &str) -> std::result::Result<TickOutput, String> {
     for j in &mut out.journal {
         j.importance = j.importance.clamp(0.0, 1.0);
     }
+    // 关系增量**硬夹到 -5..=5**：模型偶尔会一次给 +20（"我们关系很好"），
+    // 那一步就能把陌生人变熟人，关系曲线就没有意义了。
+    for r in &mut out.relations {
+        r.familiarity = r.familiarity.clamp(-5, 5);
+        r.trust = r.trust.clamp(-5, 5);
+        r.closeness = r.closeness.clamp(-5, 5);
+    }
+    // 认不出人的条目直接丢：宁可少记一条关系变化，也不能让整次 tick 失败
+    // （情绪/手帐/自我认知都在同一次回答里，一起丢代价太大）
+    out.relations.retain(|r| !r.person_id.trim().is_empty());
     Ok(out)
 }
 
@@ -292,6 +372,31 @@ mod tests {
         assert!(o.journal.is_empty());
         assert!(o.self_narrative.is_none());
         assert_eq!(o.mood.dominance, 0.0);
+    }
+
+    #[test]
+    fn 关系缺_person_id_只丢这条而不是整次失败() {
+        // 实测踩过：模型只给数字不给 id，`person_id` 是必填 →
+        // 整个 TickOutput 解析失败 → 情绪和手帐一起丢。
+        // 一次可选字段不该让整次调用作废。
+        let t = r#"{"mood":{"label":"雀跃","valence":0.4,"arousal":0.5,"reason":"被帮了"},
+                    "journal":[{"summary":"他帮了忙","importance":0.6}],
+                    "relations":[{"familiarity":1,"trust":2,"closeness":1,"reason":"帮忙"}]}"#;
+        let o = parse(t).unwrap();
+        assert_eq!(o.mood.label, "雀跃");
+        assert_eq!(o.journal.len(), 1, "手帐不能因为关系条目坏了就丢");
+        assert!(o.relations.is_empty(), "认不出人的关系条目要丢掉");
+    }
+
+    #[test]
+    fn 关系增量会被夹到_5() {
+        let t = r#"{"mood":{"label":"x","valence":0,"arousal":0,"reason":"x"},
+                    "journal":[],
+                    "relations":[{"person_id":"p1","familiarity":50,"trust":-30,"closeness":99}]}"#;
+        let o = parse(t).unwrap();
+        assert_eq!(o.relations[0].familiarity, 5);
+        assert_eq!(o.relations[0].trust, -5);
+        assert_eq!(o.relations[0].closeness, 5, "一步不许把陌生人变熟人");
     }
 
     #[test]

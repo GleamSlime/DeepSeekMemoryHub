@@ -4085,16 +4085,14 @@ async fn 特质可以删除并留回滚记录() {
         .unwrap();
     assert_eq!(r.status(), 200);
 
-    let n: i64 = s
-        .db
-        .with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM trait", [], |r| r.get(0))?))
-        .unwrap();
+    let n: i64 =
+        s.db.with_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM trait", [], |r| r.get(0))?))
+            .unwrap();
     assert_eq!(n, 0);
 
     // trait 是真删，但至少有一条 rollback_log 说明它什么时候没的
-    let logs: i64 = s
-        .db
-        .with_read(|c| {
+    let logs: i64 =
+        s.db.with_read(|c| {
             Ok(c.query_row(
                 "SELECT COUNT(*) FROM rollback_log WHERE affected_json LIKE '%warmth%'",
                 [],

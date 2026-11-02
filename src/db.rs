@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 21;
+pub const SCHEMA_VERSION: i32 = 22;
 
 /// 数据库句柄。
 ///
@@ -280,6 +280,18 @@ impl Db {
             // 图片用途（emoji/photo）。老库补列后一律为空 = photo，
             // 也就是「不自动发」——安全的一侧。
             add_column_if_missing(tx, "image", "kind", "TEXT")?;
+
+            // 关系里的「印象」：对这个人的**主观判断**，不是数值。
+            //
+            // 和 familiarity/trust/closeness 的区别：
+            // 那三个是「有多熟」（可算），印象是「我觉得他是什么样的人」（要描述）。
+            // 它影响**回复的语气与分寸** —— 面对「爱开玩笑的人」和
+            // 「说话很认真的人」，同样一句话说法完全不同。
+            //
+            // 隐私：它只在**提到这个人**时进上下文，且文案里明确写
+            // 「不要说出你对他的印象」—— 那是内部参考，说出来会很冒犯。
+            add_column_if_missing(tx, "relation", "impression", "TEXT")?;
+            add_column_if_missing(tx, "relation", "impression_ms", "INTEGER")?;
 
             // ---------------------------------------------------------- 去重索引
             //

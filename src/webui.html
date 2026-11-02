@@ -477,6 +477,7 @@ const PAGES = {
   llm:       {title:'模型',     icon:'🤖', url:'/api/admin/llm'},
   genlog:    {title:'生成记录', icon:'📜', url:'/api/admin/generate/log'},
   usage:     {title:'用量统计', icon:'📊', url:'/api/admin/generate/stats'},
+  mail:      {title:'邮件备份', icon:'📧', url:'/api/admin/mail'},
   settings:  {title:'配置',     icon:'🎛', url:'/api/admin/settings'},
   persons:   {title:'身份',     icon:'👥', url:'/api/admin/persons'},
   snapshots: {title:'快照',     icon:'💾', url:'/api/admin/snapshots'},
@@ -492,7 +493,8 @@ const NAV_GROUPS = [
   {label:'素材', items:['images','voices']},
   {label:'渠道', items:['channels','messages']},
   {label:'生成', items:['llm','genlog','usage']},
-  {label:'运维', items:['persons','replay','snapshots','rollbacks','settings','system']},
+  {label:'备份', items:['mail','snapshots','rollbacks']},
+  {label:'运维', items:['persons','replay','settings','system']},
 ];
 
 let state = { page:'overview', params:{}, overview:null };
@@ -571,6 +573,7 @@ async function render(){
     if(state.page==='llm') return await renderLlm(c);
     if(state.page==='genlog') return await renderGenLog(c);
     if(state.page==='usage') return await renderUsage(c);
+    if(state.page==='mail') return await renderMail(c);
     if(state.page==='settings') return await renderSettings(c);
     // 走到这里说明这一页没有专用渲染函数，只能靠通用表格。
     // 但**通用表格只认固定几个表名**：如果连 PAGES 里都没有这一页，
@@ -1658,7 +1661,7 @@ async function renderRelations(c){
       <button class="primary" id="relNew">+ 新建关系</button></div>
     <div style="overflow-x:auto"><table><thead><tr>
       <th>人</th><th>各场景里的称呼</th><th>阶段</th><th style="width:150px">亲密度</th>
-      <th class="num">熟悉</th><th class="num">信任</th><th>最近</th></tr></thead>
+      <th class="num">熟悉</th><th class="num">信任</th><th>印象</th><th>最近</th></tr></thead>
     <tbody>${items.map(r=>`<tr style="cursor:pointer" data-rel='${esc(JSON.stringify(r))}'>
       <td><b>${esc(r.display_name||r.person_id)}</b>${r.note?`<div class="dim" style="font-size:11.5px">${esc(r.note)}</div>`:''}</td>
       <td>${sceneLine(r.scenes)}</td>
@@ -1666,6 +1669,7 @@ async function renderRelations(c){
       <td>${impBar(r.closeness/100)}</td>
       <td class="num">${r.familiarity}</td>
       <td class="num">${r.trust}</td>
+      <td class="dim" style="max-width:240px;font-size:12px">${r.impression?esc(r.impression):'<span class="dim">—</span>'}</td>
       <td class="mono dim nowrap">${fmtAgo(r.last_met_ms)}</td></tr>`).join('')}</tbody>
     </table></div>
   </div>`;
@@ -2070,12 +2074,22 @@ async function renderPersonas(c){
     });
     $('perTestBtn').onclick=async()=>{
       const m=$('perTest').value.trim();
+      const re=$('perRegex').value.trim();
       try{
-        const r = await api('/api/admin/persona/preview?model='+encodeURIComponent(m));
-        $('perTestOut').textContent = r.matched
-          ? `命中「${r.matched.name}」（正则 ${r.matched.model_regex||'兜底'}，优先级 ${r.matched.priority}）`
-          : '没有命中任何人格（这段模型 id 不会注入人设）';
-      }catch(e){ $('perTestOut').textContent='试匹配失败：'+e.message; }
+        // **测的是上面输入框里这条正则**，不是库里已有的 ——
+        // 编辑一条新正则时点它，看到旧条目的结果会让人以为「匹配不到」。
+        const r = await api('/api/admin/persona/preview?model='+encodeURIComponent(m)
+                            +'&regex='+encodeURIComponent(re));
+        if(r.matched){
+          $('perTestOut').textContent = r.matched.fallback
+            ? `正则为空 = 兜底（任何模型都会命中，但优先级永远最低）`
+            : `✓ 这条正则能匹配「${m}」`;
+          $('perTestOut').style.color='var(--ok)';
+        } else {
+          $('perTestOut').textContent = `✗ 这条正则匹配不到「${m}」`;
+          $('perTestOut').style.color='var(--err)';
+        }
+      }catch(e){ $('perTestOut').textContent='试匹配失败：'+e.message; $('perTestOut').style.color='var(--err)'; }
     };
     $('perSave').onclick=async()=>{
       const en=$('perEnabled').querySelector('button.on');
@@ -2622,6 +2636,100 @@ async function renderUsage(c){
     <td class="num mono dim">${r.elapsed_ms}ms</td>
     <td class="dim" style="max-width:220px">${esc((r.ok?r.result:r.error)||'—')}</td>
   </tr>`).join('')}</tbody></table></div>`:''}`;
+}
+
+// ---------- 邮件备份（SMTP）
+async function renderMail(c){
+  const d = await api('/api/admin/mail');
+  const M = d || {};
+  c.innerHTML = `
+  <p class="dim" style="font-size:12.5px;margin:0 0 16px">
+    快照生成后自动打包、压缩、<b>加密</b>，发到这个邮箱 —— 异地留一份，
+    免得本机磁盘坏了快照也跟着没了。
+    <br>邮件正文只有「哪天、多大、怎么解开」，<b>不含任何记忆内容</b>。
+  </p>
+
+  <div class="card" style="max-width:760px;padding:18px">
+    <div class="editrow" style="margin-bottom:12px">
+      <label style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="mEnable" ${M.enable?'checked':''} style="width:auto">
+        启用邮件备份
+      </label>
+    </div>
+    <div class="editrow" style="display:flex;gap:14px;flex-wrap:wrap">
+      <label style="flex:2">SMTP 服务器<input id="mHost" value="${esc(M.host||'')}" placeholder="smtp.qq.com"></label>
+      <label style="flex:1">端口<input id="mPort" type="number" value="${M.port||465}"></label>
+    </div>
+    <div class="dim" style="font-size:11.5px;margin:-6px 0 10px">
+      465 = 隐式 TLS；其他端口（587/25）走 STARTTLS。不支持明文。
+    </div>
+    <div class="editrow" style="display:flex;gap:14px;flex-wrap:wrap">
+      <label style="flex:1">用户名<input id="mUser" value="${esc(M.username||'')}" placeholder="a@qq.com"></label>
+      <label style="flex:1">密码/授权码 <span class="dim">${M.password&&M.password.set?'已设置':'未设置'}</span>
+        <input id="mPass" type="password" placeholder="${M.password&&M.password.set?'留空不改':'授权码'}"></label>
+    </div>
+    <div class="editrow" style="display:flex;gap:14px;flex-wrap:wrap">
+      <label style="flex:1">发件人 <span class="dim">留空=同用户名</span><input id="mFrom" value="${esc(M.from||'')}"></label>
+      <label style="flex:1">收件人 <span class="dim">逗号分隔</span><input id="mTo" value="${esc(M.to||'')}"></label>
+    </div>
+    <div style="border-top:1px solid var(--line);margin:16px 0;padding-top:14px">
+      <div class="sectitle">加密</div>
+      <div class="editrow" style="margin-bottom:10px">
+        <label style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="mEnc" ${M.encrypt?'checked':''} style="width:auto">
+          加密后发送（<b>建议保持开启</b> —— 快照里有全部私聊内容和日记）
+        </label>
+      </div>
+      <div class="editrow">
+        <label>加密口令 <span class="dim">${M.passphrase&&M.passphrase.set?'已设置':'<b style="color:var(--err)">未设置（会拒绝发送）</b>'}</span>
+          <input id="mPhrase" type="password" placeholder="${M.passphrase&&M.passphrase.set?'留空不改':'设一个，丢了就解不开'}"></label>
+      </div>
+      <p class="dim" style="font-size:11.5px;margin:8px 0 0">
+        ⚠️ 口令<b>不会</b>存在附件里，也<b>不会</b>随邮件发出。
+        <b>忘了就没有任何办法解开</b> —— 请自己另存一份。
+      </p>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px;align-items:center">
+      <button class="primary" id="mSave">保存</button>
+      <button id="mTest">发测试邮件</button>
+      <span id="mOut" class="dim" style="font-size:12.5px"></span>
+    </div>
+  </div>
+
+  <div class="card" style="max-width:760px;padding:16px;margin-top:16px">
+    <div class="sectitle">怎么解开备份</div>
+    <pre class="body" style="font-size:12px;text-align:left;margin:0">附件是 .bwsnap，三步：
+1) 若是加密包：按口令解开（面板「快照」页提供命令行，或联系维护者）
+2) gunzip 得到 .db 文件
+3) 它是一个完整的 SQLite 库，可直接替换 data/store/memory.db
+
+包里有 sha256 与长度校验，被截断/改过会明确报错，不会给你半个库。</pre>
+  </div>`;
+
+  const body = ()=>({
+    enable: $('mEnable').checked,
+    host: $('mHost').value.trim(),
+    port: +$('mPort').value,
+    username: $('mUser').value.trim(),
+    password: $('mPass').value || undefined,
+    from: $('mFrom').value.trim(),
+    to: $('mTo').value.trim(),
+    encrypt: $('mEnc').checked,
+    passphrase: $('mPhrase').value || undefined,
+    on_snapshot: true
+  });
+  $('mSave').onclick=async()=>{
+    try{ await apiDo('POST','/api/admin/mail', body()); toast('已保存'); render(); }
+    catch(e){ toast('保存失败：'+e.message, true); }
+  };
+  $('mTest').onclick=async()=>{
+    const o=$('mOut'); o.textContent='发送中…'; o.style.color='';
+    try{
+      const r=await apiDo('POST','/api/admin/mail/test');
+      if(r.ok){ o.textContent=`✓ 已发出（${r.elapsed_ms}ms → ${r.to}）`; o.style.color='var(--ok)'; }
+      else { o.textContent='✗ '+r.error; o.style.color='var(--err)'; }
+    }catch(e){ o.textContent='✗ '+e.message; o.style.color='var(--err)'; }
+  };
 }
 
 // ---------- 配置

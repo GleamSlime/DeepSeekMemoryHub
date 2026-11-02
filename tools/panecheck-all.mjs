@@ -48,6 +48,12 @@ const DATA = {
               reinforce_gain: 0.05, reinforce_cap: 2, channel_trust_mc: 1,
               channel_trust_qq: 0.9, channel_trust_live: 0.8, channel_trust_system: 1 },
   },
+  'api/admin/mail': {
+    enable: true, host: 'smtp.qq.com', port: 465, username: 'a@qq.com',
+    from: '', to: 'b@qq.com', encrypt: true, on_snapshot: true,
+    timeout_seconds: 30, password: { secret: true, set: true },
+    passphrase: { secret: true, set: true }, ready: true,
+  },
   'api/admin/channels': [
     { tag: 'mc', label: 'Minecraft', trust: 1, builtin: true, events: 5 },
     { tag: 'qq', label: 'QQ', trust: 0.9, builtin: true, events: 3 },
@@ -123,6 +129,7 @@ const DATA = {
   'api/admin/relations': { items: [
     { person_id: 'p1', display_name: '姆姆', familiarity: 5, trust: 3, closeness: 20,
       note: '一起挖过矿', first_met_ms: 1, last_met_ms: 2, stage: '认识',
+      impression: '嘴上爱损人，但会主动帮忙，不用跟他客气',
       scenes: [{ scene: 'mc', label: 'MC 里', name: 'GleamSlime', source: 'manual', hint: null }] },
   ] },
   'api/admin/persons': { items: [

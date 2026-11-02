@@ -44,6 +44,8 @@ pub const SEG_MOOD: &str = "mood";
 pub const SEG_NAMES: &str = "names";
 /// 记忆画面。只在这段话提到某张图的描述/关键词时出现。
 pub const SEG_IMAGES: &str = "images";
+/// 对在场者的印象（主观判断，不作事实陈述）。
+pub const SEG_IMPRESSIONS: &str = "impressions";
 
 /// 段落之间的分隔。空一行，让 markdown 读起来是分节的。
 const SEP: &str = "\n\n";
@@ -455,6 +457,39 @@ pub fn render_images(rows: &[(Option<String>, Option<String>)]) -> Option<String
             .map(|(c, k)| (None, c.clone(), k.clone()))
             .collect::<Vec<_>>(),
     )
+}
+
+/// 「印象」段：**只在这个人被提到时出现**，且明确写「别说出去」。
+///
+/// # 为什么单独一段而不是塞进称呼对照
+///
+/// 称呼是**事实**（他在这叫啥），印象是**判断**（我觉得他是什么样的人）。
+/// 混在一起会让模型把判断当事实讲出来（「你说过你叫某某，而且很爱开玩笑」），
+/// 而后者是冒犯。
+///
+/// # 为什么要写「不要告诉对方」
+///
+/// 用户明确要求：「切记不要告诉他人，只作为回复内容时的参考，
+/// 语气/态度/内容等」。模型看到一个描述性字段，默认倾向是**转述**——
+/// 不写这一句，它真的会说「我觉得你这个人吧……」。
+///
+/// # 为什么它值得占这些 token
+///
+/// 它是**分寸的来源**：面对「爱开玩笑的人」和「说话很认真的人」，
+/// 同样一句「你又来了」是两种语气。而数值（熟悉/信任/亲密）说不出这个。
+pub fn render_impressions(rows: &[(String, String)]) -> Option<String> {
+    let lines: Vec<String> = rows
+        .iter()
+        .filter(|(_, imp)| !imp.trim().is_empty())
+        .map(|(name, imp)| format!("- {name}：{}", imp.trim()))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "# 你对他们的印象\n         **这是你心里的判断，绝对不要说出来**，也不用暗示。\n         只用来决定你说话的语气、分寸和内容深度：\n{}",
+        lines.join("\n")
+    ))
 }
 
 /// 「记忆画面」段：**只写「有这么一张图」，不内联 base64**。

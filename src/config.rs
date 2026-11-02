@@ -173,6 +173,10 @@ pub struct Config {
     #[serde(default)]
     pub generate: crate::generate::GenConfig,
 
+    /// SMTP：快照生成后发到邮箱（异地备份）。
+    #[serde(default)]
+    pub mail: crate::mail::MailConfig,
+
     /// 每个连接的请求体上限（字节）。默认 8 MiB。
     pub max_body_bytes: usize,
 
@@ -218,6 +222,7 @@ impl Default for Config {
             weight: WeightConfig::default(),
             llm: crate::llm::LlmConfig::default(),
             generate: crate::generate::GenConfig::default(),
+            mail: crate::mail::MailConfig::default(),
             max_body_bytes: 8 * 1024 * 1024,
             request_timeout_seconds: 30,
             max_concurrency: 4096,

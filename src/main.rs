@@ -36,6 +36,9 @@ async fn main() {
         "rollback-history" => cli_history(),
         "doctor" => cli_doctor(),
         "migrate" => cli_migrate(&args),
+        // 快照打包/解包。手动备份、以及从邮件附件恢复时用。
+        "pack" => cli_pack(&args),
+        "unpack" => cli_unpack(&args),
         "--version" | "-V" => {
             println!(
                 "{APP_NAME} {VERSION} (schema {})",
@@ -94,6 +97,86 @@ fn print_help() {
     );
 }
 
+/// `pack <快照.db> [输出.bwsnap] [--pass 口令]`
+///
+/// 不给输出路径就写 `<快照名>.bwsnap`。
+fn cli_pack(args: &[String]) -> bluewhale_memory::Result<()> {
+    use bluewhale_memory::snapshot_pack;
+    let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+    if rest.is_empty() || rest[0] == "--help" || rest[0] == "-h" {
+        println!(
+            "用法：bluewhale-memory pack <快照.db> [输出.bwsnap] [--pass 口令]\n\n             不给 --pass 就只压缩不加密。加密包丢了口令**无法恢复**。"
+        );
+        return Ok(());
+    }
+    let src = std::path::PathBuf::from(rest[0]);
+    if !src.exists() {
+        return Err(bluewhale_memory::error::Error::BadRequest(format!(
+            "文件不存在：{}",
+            src.display()
+        )));
+    }
+    let pass = rest
+        .iter()
+        .position(|s| *s == "--pass")
+        .and_then(|i| rest.get(i + 1))
+        .copied();
+    let dst = rest
+        .get(1)
+        .filter(|s| !s.starts_with("--"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| src.with_extension("bwsnap"));
+
+    let p = snapshot_pack::pack(&src, &dst, pass)?;
+    println!(
+        "已打包：{}\n  原始 {} 字节 → 包 {} 字节（{:.1}%）\n  模式：{}\n  sha256：{}",
+        p.path.display(),
+        p.raw_bytes,
+        p.bytes,
+        p.bytes as f64 / p.raw_bytes.max(1) as f64 * 100.0,
+        match p.mode {
+            snapshot_pack::Mode::Encrypted => "压缩+加密",
+            snapshot_pack::Mode::Compressed => "仅压缩",
+        },
+        p.sha256
+    );
+    Ok(())
+}
+
+/// `unpack <包.bwsnap> [输出.db] [--pass 口令]`
+///
+/// 会**先完整校验**再落盘：包被截断/改过会明确报错，不会写出半个库。
+fn cli_unpack(args: &[String]) -> bluewhale_memory::Result<()> {
+    use bluewhale_memory::snapshot_pack;
+    let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+    if rest.is_empty() || rest[0] == "--help" || rest[0] == "-h" {
+        println!(
+            "用法：bluewhale-memory unpack <包.bwsnap> [输出.db] [--pass 口令]\n\n             解出来的 .db 可直接替换 data/store/memory.db。"
+        );
+        return Ok(());
+    }
+    let src = std::path::PathBuf::from(rest[0]);
+    let pass = rest
+        .iter()
+        .position(|s| *s == "--pass")
+        .and_then(|i| rest.get(i + 1))
+        .copied();
+    let dst = rest
+        .get(1)
+        .filter(|s| !s.starts_with("--"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| src.with_extension("db"));
+
+    let raw = snapshot_pack::unpack(&src, pass)?;
+    std::fs::write(&dst, &raw)?;
+    println!(
+        "已解出：{}（{} 字节）\n校验通过（包头 + 长度 + gzip 完整性）",
+        dst.display(),
+        raw.len()
+    );
+    Ok(())
+}
+
 fn load_config() -> bluewhale_memory::Result<Config> {
     let mut cfg = Config::from_env()?;
     cfg.normalize_paths();
@@ -124,7 +207,7 @@ async fn serve() -> bluewhale_memory::Result<()> {
         tracing::info!("监听 {addr}（token 已启用）");
     }
 
-    spawn_daily_snapshot(db.clone(), cfg.clone());
+    spawn_daily_snapshot(db.clone(), cfg.clone(), state.mail.clone());
 
     // 生成任务后台循环（日记/周记 + 被动 tick）。
     //
@@ -165,8 +248,99 @@ async fn serve() -> bluewhale_memory::Result<()> {
     Ok(())
 }
 
+/// 把最新一份快照打包（+可选加密）发到配置的邮箱。
+///
+/// 返回一句给日志看的摘要。**失败只记日志**，不影响快照本身 ——
+/// 邮件是备份的备份，不能因为它挂了把主流程拖下水。
+fn send_snapshot_mail(
+    db: &Db,
+    cfg: &Config,
+    mc: &bluewhale_memory::mail::MailConfig,
+) -> bluewhale_memory::Result<String> {
+    use bluewhale_memory::snapshot::SnapshotStore;
+
+    let store = SnapshotStore::new(cfg.snapshot_dir())?;
+    let some = store.latest(db)?;
+    let info =
+        some.ok_or_else(|| bluewhale_memory::error::Error::Storage("没有可发的快照".into()))?;
+
+    // 1) 先验快照本身完好 —— **发一份坏备份比不发更糟**：
+    //    人以为有备份，真出事时才发现打不开。
+    if !store.verify(&info)? {
+        return Err(bluewhale_memory::error::Error::Storage(
+            "快照校验不通过（sha256 或 quick_check 失败），拒绝发送".into(),
+        ));
+    }
+
+    // 2) 打包
+    let pass = if mc.encrypt {
+        Some(mc.passphrase.as_str())
+    } else {
+        None
+    };
+    let day = bluewhale_memory::generate::collect::fmt_day(info.taken_ms);
+    let out = cfg.snapshot_dir().join(format!("{day}.bwsnap"));
+    let packed =
+        bluewhale_memory::snapshot_pack::pack(std::path::Path::new(&info.path), &out, pass)?;
+
+    // 3) 发
+    let ratio = if packed.raw_bytes > 0 {
+        packed.bytes as f64 / packed.raw_bytes as f64 * 100.0
+    } else {
+        0.0
+    };
+    let subject = format!("蓝鲸记忆中枢 快照 {day}");
+    let body = format!(
+        "自动备份。\n\n         日期：{day}\n         原始大小：{raw} 字节\n         附件大小：{bytes} 字节（压缩后 {ratio:.1}%）\n         sha256：{sha}\n\
+         模式：{mode}\n\n         {how}\n",
+        day = day,
+        raw = packed.raw_bytes,
+        bytes = packed.bytes,
+        ratio = ratio,
+        sha = packed.sha256,
+        mode = match packed.mode {
+            bluewhale_memory::snapshot_pack::Mode::Encrypted => "压缩 + 加密",
+            bluewhale_memory::snapshot_pack::Mode::Compressed => "仅压缩",
+        },
+        how = if packed.mode == bluewhale_memory::snapshot_pack::Mode::Encrypted {
+            "附件是 .bwsnap。解开方式见「运维 → 快照」页的说明（需要加密口令）。"
+        } else {
+            "附件是 .bwsnap（gzip 压缩）。解开：gunzip 后即为 SQLite 文件。"
+        }
+    );
+    let name = out
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "snapshot.bwsnap".into());
+    bluewhale_memory::mail::send(
+        mc,
+        &subject,
+        &body,
+        Some((&name, std::fs::read(&out)?, "application/octet-stream")),
+    )?;
+
+    Ok(format!(
+        "{day} · {} KB · {:.0}% · 发给 {}",
+        packed.bytes / 1024,
+        ratio,
+        mc.recipients()
+            .iter()
+            .map(|a| bluewhale_memory::mail::mask_addr(a))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// 每天至少一份快照。每小时检查，`ensure_daily` 保证同一天只拍一份。
-fn spawn_daily_snapshot(db: Arc<Db>, cfg: Arc<Config>) {
+///
+/// 拍完（且**今天确实新拍了一份**时）打包 + 可选加密 + 发邮件。
+/// 只在「新拍」时发：每小时检查都会走到这里，但 `created=false`
+/// 时就该跳过，否则一天发 24 封一样的邮件。
+fn spawn_daily_snapshot(
+    db: Arc<Db>,
+    cfg: Arc<Config>,
+    mail: Arc<std::sync::RwLock<bluewhale_memory::mail::MailConfig>>,
+) {
     tokio::spawn(async move {
         let store = match SnapshotStore::new(cfg.snapshot_dir()) {
             Ok(s) => s,
@@ -189,6 +363,24 @@ fn spawn_daily_snapshot(db: Arc<Db>, cfg: Arc<Config>) {
                 Ok(Ok((created, pruned))) => {
                     if created {
                         tracing::info!("今日快照已生成");
+                        // 生成之后才发邮件（同一个 loop 里，不去另开任务）
+                        let mc = match mail.read() {
+                            Ok(g) => g.clone(),
+                            Err(e) => e.into_inner().clone(),
+                        };
+                        if mc.enable && mc.on_snapshot {
+                            let db3 = db.clone();
+                            let cfg3 = cfg.clone();
+                            let r = tokio::task::spawn_blocking(move || {
+                                send_snapshot_mail(&db3, &cfg3, &mc)
+                            })
+                            .await;
+                            match r {
+                                Ok(Ok(summary)) => tracing::info!("快照邮件已发送：{summary}"),
+                                Ok(Err(e)) => tracing::warn!("快照邮件发送失败：{e}"),
+                                Err(e) => tracing::warn!("快照邮件任务失败：{e}"),
+                            }
+                        }
                     }
                     if pruned > 0 {
                         tracing::info!("清理过期快照 {pruned} 份");

@@ -31,6 +31,8 @@ sha2 = "0.10"
 # 实测代价：二进制净增约 2.4 MB（5.6 → 约 8 MB），见 docs/知识库接入方案.md §0。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 regex = "1.13.1"
+flate2 = "1.1.10"
+lettre = { version = "0.11.19", default-features = false, features = ["smtp-transport", "builder", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"

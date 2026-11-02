@@ -64,6 +64,12 @@ pub fn router(state: AdminState) -> Router {
         .route("/api/admin/llm/test", axum::routing::post(api_test_llm))
         .route("/api/admin/generate/log", get(api_gen_log))
         .route("/api/admin/generate/stats", get(api_gen_stats))
+        .route("/api/admin/mail", get(api_get_mail).post(api_save_mail))
+        .route(
+            "/api/admin/relation/impressions/backfill",
+            axum::routing::post(api_backfill_impressions),
+        )
+        .route("/api/admin/mail/test", axum::routing::post(api_test_mail))
         .route(
             "/api/admin/generate/tick",
             axum::routing::post(api_force_tick),
@@ -704,6 +710,242 @@ async fn api_gen_log(
         "consecutive_failures": fails,
         "tick_state": st2.unwrap_or(serde_json::Value::Null),
     })))
+}
+
+#[derive(Deserialize)]
+struct ImpressionBackfillReq {
+    /// 只处理这些人；空 = 所有还没有印象的关系。
+    person_ids: Option<Vec<String>>,
+    /// 已有印象也重算（默认不覆盖）。
+    #[serde(default)]
+    overwrite: bool,
+}
+
+/// 按历史事件/日记为已有关系回溯生成「印象」。
+///
+/// 用户要求「增加后先按照历史事件/日记做一次已有关系等印象数据生成」。
+/// 手动触发而不是后台自动跑：一次回溯要花 N 个请求（N = 人数），
+/// 该由人决定什么时候花。
+async fn api_backfill_impressions(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(req): Json<ImpressionBackfillReq>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let llm = st
+        .app
+        .llm
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    if !llm.is_ready() {
+        return Err(Error::BadRequest("LLM 还没配置，先在「模型」页填好".into()));
+    }
+    let gen = st
+        .app
+        .gen_cfg
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    let mut c = (*st.app.cfg).clone();
+    c.llm = llm;
+    c.generate = gen;
+
+    let db = st.app.db.clone();
+    let targets: Vec<String> = match req.person_ids {
+        Some(v) if !v.is_empty() => v,
+        _ => {
+            let db2 = db.clone();
+            tokio::task::spawn_blocking(move || -> crate::error::Result<Vec<String>> {
+                db2.with_read(|cc| {
+                    let mut stmt = cc.prepare(
+                        "SELECT person_id FROM relation
+                         WHERE impression IS NULL OR TRIM(impression) = ''",
+                    )?;
+                    let v = stmt
+                        .query_map([], |r| r.get::<_, String>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    Ok(v)
+                })
+            })
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))??
+        }
+    };
+
+    let mut done = Vec::new();
+    let mut skipped = Vec::new();
+    let mut failed = Vec::new();
+    for pid in targets {
+        match crate::generate::backfill_impression::one(&db, &c, &pid, req.overwrite).await {
+            Ok(true) => {
+                let imp: Option<String> = db
+                    .with_read(|cc| {
+                        Ok(cc
+                            .query_row(
+                                "SELECT impression FROM relation WHERE person_id = ?1",
+                                rusqlite::params![&pid],
+                                |r| r.get::<_, Option<String>>(0),
+                            )
+                            .ok()
+                            .flatten())
+                    })
+                    .unwrap_or(None);
+                done.push(serde_json::json!({ "person_id": pid, "impression": imp }));
+            }
+            Ok(false) => skipped.push(serde_json::json!({ "person_id": pid, "why": "已有印象" })),
+            Err(e) => failed.push(serde_json::json!({ "person_id": pid, "error": e.to_string() })),
+        }
+        // 每个人之间歇一下：连续打会被网关限流，而回溯不着急
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true, "done": done, "skipped": skipped, "failed": failed,
+    })))
+}
+
+// ================================================================== SMTP
+
+async fn api_get_mail(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let mc = st
+        .app
+        .mail
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    Ok(Json(mc.public_view()))
+}
+
+#[derive(Deserialize)]
+struct MailPatch {
+    enable: Option<bool>,
+    host: Option<String>,
+    port: Option<u16>,
+    username: Option<String>,
+    /// 空 = 不改（面板不回显）。
+    password: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    encrypt: Option<bool>,
+    passphrase: Option<String>,
+    timeout_seconds: Option<u64>,
+    on_snapshot: Option<bool>,
+}
+
+async fn api_save_mail(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(p): Json<MailPatch>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let mut mc = st
+        .app
+        .mail
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    if let Some(v) = p.enable {
+        mc.enable = v;
+    }
+    if let Some(v) = p.host {
+        mc.host = v.trim().to_string();
+    }
+    if let Some(v) = p.port {
+        mc.port = v;
+    }
+    if let Some(v) = p.username {
+        mc.username = v.trim().to_string();
+    }
+    // 空密码/口令 = 不改
+    if let Some(v) = p.password.as_deref() {
+        if !v.is_empty() {
+            mc.password = v.to_string();
+        }
+    }
+    if let Some(v) = p.passphrase.as_deref() {
+        if !v.is_empty() {
+            mc.passphrase = v.to_string();
+        }
+    }
+    if let Some(v) = p.from {
+        mc.from = v.trim().to_string();
+    }
+    if let Some(v) = p.to {
+        mc.to = v.trim().to_string();
+    }
+    if let Some(v) = p.encrypt {
+        mc.encrypt = v;
+    }
+    if let Some(v) = p.timeout_seconds {
+        mc.timeout_seconds = v.clamp(5, 300);
+    }
+    if let Some(v) = p.on_snapshot {
+        mc.on_snapshot = v;
+    }
+
+    // 落盘前先校验：开了加密没口令这种事，保存时就要拦住
+    if mc.enable {
+        mc.validate_for_send()
+            .map_err(|e| Error::BadRequest(e.to_string()))?;
+    }
+
+    let llm = st
+        .app
+        .llm
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    let gen = st
+        .app
+        .gen_cfg
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    crate::http::save_all(&st.app.cfg, &llm, &gen, &mc);
+    if let Ok(mut g) = st.app.mail.write() {
+        *g = mc.clone();
+    }
+    Ok(Json(
+        serde_json::json!({ "ok": true, "mail": mc.public_view() }),
+    ))
+}
+
+/// 发一封测试邮件（不带附件）。配完立刻知道通不通。
+async fn api_test_mail(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+    let mc = st
+        .app
+        .mail
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
+    let to = mc
+        .recipients()
+        .iter()
+        .map(|a| crate::mail::mask_addr(a))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = "这是一封测试邮件。\n\n如果你收到它，说明 SMTP 配置可用；\n                真正的快照会在每天生成后自动带上附件发出。\n";
+    let r = tokio::task::spawn_blocking(move || {
+        crate::mail::send(&mc, "蓝鲸记忆中枢 SMTP 测试", body, None)
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))?;
+    match r {
+        Ok(ms) => Ok(Json(serde_json::json!({
+            "ok": true, "elapsed_ms": ms, "to": to,
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "ok": false, "error": e.to_string(), "to": to,
+        }))),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1444,17 +1686,56 @@ async fn api_delete_persona(
 #[derive(Deserialize)]
 struct PersonaPreview {
     model: Option<String>,
+    /// 只测**这一条正则**（面板编辑时输入框里的内容），不管它存没存库。
+    ///
+    /// 为什么需要：原来的「试匹配」只会测**库里已有的人格**。
+    /// 编辑一条新正则时点它，看到的是「旧正则能匹配什么」——
+    /// 用户 2026-11-02 就是这么困惑的：填了
+    /// `.*?(dfmodel|deepseek-v4.1-flash)`、测 `trae/deepseek-v4.1-flash`，
+    /// 后端其实匹配成功了，但面板上测的是别的条目，看起来像「匹配不到」。
+    regex: Option<String>,
 }
 
 /// 给定模型 id，返回**会命中哪一条**人格。面板上填完正则能立刻验。
+///
+/// 传了 `regex` 就只测这一条（含空串 = 测兜底），不查库。
 async fn api_persona_preview(
     State(st): State<AdminState>,
     headers: HeaderMap,
     Query(q): Query<PersonaPreview>,
 ) -> ApiResult<serde_json::Value> {
     require_session(&st, &headers)?;
-    let db = st.app.db.clone();
     let model = q.model.unwrap_or_default();
+
+    // 只测给定的这一条正则（面板输入框里的），不查库
+    if let Some(re) = q.regex {
+        let re = re.trim().to_string();
+        if re.is_empty() {
+            // 空 = 兜底：按定义永远命中（优先级最低，但确实命中）
+            return Ok(Json(serde_json::json!({
+                "model": model,
+                "matched": { "name": "（兜底）", "model_regex": "", "priority": 0,
+                             "fallback": true },
+                "body": null,
+            })));
+        }
+        let compiled =
+            regex::Regex::new(&re).map_err(|e| Error::BadRequest(format!("正则写错了：{e}")))?;
+        let hit = compiled.is_match(&model);
+        return Ok(Json(serde_json::json!({
+            "model": model,
+            "regex": re,
+            "tested_only": true,
+            "matched": if hit {
+                serde_json::json!({ "name": "（这条正则）", "model_regex": re,
+                                    "priority": 0, "regex_only": true })
+            } else {
+                serde_json::Value::Null
+            },
+        })));
+    }
+
+    let db = st.app.db.clone();
     let m2 = model.clone();
     let hit = tokio::task::spawn_blocking(move || query::pick_persona(&db, &m2))
         .await

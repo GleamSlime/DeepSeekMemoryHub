@@ -56,6 +56,8 @@ pub struct AppState {
     pub llm: Arc<std::sync::RwLock<crate::llm::LlmConfig>>,
     /// 生成配置（同样可热改）。
     pub gen_cfg: Arc<std::sync::RwLock<crate::generate::GenConfig>>,
+    /// SMTP 配置（同样可热改）。
+    pub mail: Arc<std::sync::RwLock<crate::mail::MailConfig>>,
     /// 嵌入客户端。`None` = 知识库未启用或未配置嵌入服务。
     ///
     /// **不是硬依赖**：为 `None` 时知识库检索退回纯字面，
@@ -87,6 +89,8 @@ impl AppState {
         // 没有就用配置文件里的。
         let llm = load_llm(&cfg).unwrap_or_else(|| cfg.llm.clone());
         let gen_cfg = load_gen_cfg(&cfg).unwrap_or_else(|| cfg.generate.clone());
+        // `cfg` 下面会被 move 进结构体，先取出 mail
+        let mail = load_mail(&cfg).unwrap_or_default();
         Ok(Self {
             db,
             cfg,
@@ -97,6 +101,7 @@ impl AppState {
             gen_state: Arc::new(crate::generate::exec::TickState::default()),
             llm: Arc::new(std::sync::RwLock::new(llm)),
             gen_cfg: Arc::new(std::sync::RwLock::new(gen_cfg)),
+            mail: Arc::new(std::sync::RwLock::new(mail)),
             embedder,
             auth,
         })
@@ -248,6 +253,8 @@ struct LlmFile {
     llm: crate::llm::LlmConfig,
     #[serde(default)]
     generate: crate::generate::GenConfig,
+    #[serde(default)]
+    mail: crate::mail::MailConfig,
 }
 
 fn load_llm(cfg: &Config) -> Option<crate::llm::LlmConfig> {
@@ -262,12 +269,30 @@ fn load_gen_cfg(cfg: &Config) -> Option<crate::generate::GenConfig> {
     Some(f.generate)
 }
 
+fn load_mail(cfg: &Config) -> Option<crate::mail::MailConfig> {
+    let text = std::fs::read_to_string(llm_path(cfg)).ok()?;
+    let f: LlmFile = serde_json::from_str(&text).ok()?;
+    Some(f.mail)
+}
+
 /// 保存 LLM + 生成配置。**先落盘再改内存**（同 `save_weights` 的理由）。
 pub fn save_llm(cfg: &Config, llm: &crate::llm::LlmConfig, gen: &crate::generate::GenConfig) {
+    let mail = load_mail(cfg).unwrap_or_default();
+    save_all(cfg, llm, gen, &mail);
+}
+
+/// 一次写全三份（面板保存时用，避免互相覆盖）。
+pub fn save_all(
+    cfg: &Config,
+    llm: &crate::llm::LlmConfig,
+    gen: &crate::generate::GenConfig,
+    mail: &crate::mail::MailConfig,
+) {
     let p = llm_path(cfg);
     let f = LlmFile {
         llm: llm.clone(),
         generate: gen.clone(),
+        mail: mail.clone(),
     };
     match serde_json::to_string_pretty(&f) {
         Ok(text) => {
@@ -2157,6 +2182,18 @@ async fn get_context(
                 crate::context::SEG_NAMES,
             ),
             Err(e) => notes.push(format!("names: 读取失败（{e}）")),
+        }
+
+        // -------- 2.45 印象（只在这段话提到某个人时出现）
+        //
+        // 与称呼对照同一套「按需触发」：整张关系表每轮都发是白花 token，
+        // 而没提到的人，印象对这句话也没有帮助。
+        match crate::query::impressions_mentioned(&db, &needle, 3) {
+            Ok(rows) => push(
+                crate::context::render_impressions(&rows),
+                crate::context::SEG_IMPRESSIONS,
+            ),
+            Err(e) => notes.push(format!("impressions: 读取失败（{e}）")),
         }
 
         // -------- 2.5 知识库（查到的资料，**不是**亲历）

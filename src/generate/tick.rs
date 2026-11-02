@@ -65,6 +65,8 @@ pub struct TickRelation {
     pub closeness: i64,
     /// 这次对话里他说了几句话（参与度的直接证据）。
     pub said: usize,
+    /// 对这个人的**印象**（主观判断，不是数值）。空 = 还没有。
+    pub impression: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +113,9 @@ pub struct RelationDelta {
     /// 为什么变（一句话，写进面板让关系变化可解释）。
     #[serde(default)]
     pub reason: String,
+    /// 更新后的**印象**。只有真的形成了新认识才给；`null` = 不动。
+    #[serde(default)]
+    pub impression: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,6 +198,12 @@ const SYSTEM: &str = r#"你是「蓝鲸记忆中枢」的内部整理器，负�
      trust/closeness 基本不动。
    - 只有**真的发生了什么**（一起扛过事、被真诚对待、被伤害）才动 trust/closeness。
    - 关系**不会自动衰减**：淡了也不扣分，除非发生了具体的事。
+   - 可选 `impression`：对这个人**更新后的印象**，一句话、40 字以内。
+     - 它写的是「我觉得他是个什么样的人」——不是他做过什么，是**判断**。
+       例：「嘴上爱损人，但会主动帮忙，不用跟他客气」。
+     - **多数时候给 null**。只有真的形成了新的认识才改；
+       一次普通聊天不该重写你对一个人的看法。
+     - 旧印象会拿给你参考：**在它基础上微调**，不要从头重写。
 
 只输出 JSON。没事时的形状：
 {"mood":{"label":"平静","valence":0.05,"arousal":0.3,"dominance":0.0,"reason":"普通闲聊"},
@@ -265,6 +276,9 @@ pub fn render_input(i: &TickInput) -> String {
                 "- {}（id: {}）熟悉 {} / 信任 {} / 亲密 {}，这次说了 {} 句\n",
                 r.display_name, r.person_id, r.familiarity, r.trust, r.closeness, r.said
             ));
+            if let Some(imp) = r.impression.as_deref().filter(|x| !x.trim().is_empty()) {
+                s.push_str(&format!("    我对他的印象：{}\n", imp.trim()));
+            }
         }
     }
 
@@ -327,6 +341,18 @@ pub fn parse(text: &str) -> std::result::Result<TickOutput, String> {
         r.familiarity = r.familiarity.clamp(-5, 5);
         r.trust = r.trust.clamp(-5, 5);
         r.closeness = r.closeness.clamp(-5, 5);
+        // 印象要短：它每轮都进上下文，写成长段落是长期负担
+        if let Some(imp) = r.impression.as_mut() {
+            let t = imp.trim();
+            if t.chars().count() > 60 {
+                *imp = t.chars().take(60).collect::<String>() + "…";
+            } else {
+                *imp = t.to_string();
+            }
+            if imp.trim().is_empty() {
+                r.impression = None;
+            }
+        }
     }
     // 认不出人的条目直接丢：宁可少记一条关系变化，也不能让整次 tick 失败
     // （情绪/手帐/自我认知都在同一次回答里，一起丢代价太大）

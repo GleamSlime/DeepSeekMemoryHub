@@ -93,7 +93,14 @@ pub async fn backfill_day(
             if body.is_empty() {
                 return Err(Error::Storage("模型返回空文本".into()));
             }
-            let id = write_diary(db, Purpose::Diary, body, day_start_ms, day_end)?;
+            let id = write_diary(
+                db,
+                Purpose::Diary,
+                body,
+                day_start_ms,
+                day_end,
+                &cfg.llm.model,
+            )?;
             runner::log(
                 db,
                 Record {
@@ -230,7 +237,7 @@ pub async fn maybe_run(db: &Arc<Db>, cfg: &crate::config::Config, purpose: Purpo
             }
             let mut note = String::new();
             if g.write_back {
-                write_diary(db, purpose, body, window_start, now)?;
+                write_diary(db, purpose, body, window_start, now, &cfg.llm.model)?;
             } else {
                 note = "（未写库，仅记录）".into();
             }
@@ -352,8 +359,19 @@ fn one_line(s: &str, max: usize) -> String {
     }
 }
 
-/// 写库。`kind` 是 `day` / `week`。
-fn write_diary(db: &Db, purpose: Purpose, body: &str, from: i64, to: i64) -> Result<String> {
+/// 写库。`kind` 是 `day` / `week`。`model` 记**真实模型名**（不是写死 `generated`）。
+///
+/// 为什么：面板上看到「generated」会被当成模型名（用户 2026-11-02 就问
+/// 「这个是什么模型」）。它本来该是「哪个模型写的」，写死常量把信息丢了 ——
+/// 换过模型之后完全看不出哪篇是哪个模型出的。
+fn write_diary(
+    db: &Db,
+    purpose: Purpose,
+    body: &str,
+    from: i64,
+    to: i64,
+    model: &str,
+) -> Result<String> {
     let id = format!("d-{}-{}", crate::db::now_ms(), crate::http::rand_suffix());
     let now = crate::db::now_ms();
     let kind = if purpose == Purpose::Weekly {
@@ -367,8 +385,8 @@ fn write_diary(db: &Db, purpose: Purpose, body: &str, from: i64, to: i64) -> Res
         tx.execute(
             "INSERT INTO diary(id, kind, window_start_ms, window_end_ms, title, body,
                                model, created_ms, updated_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,'generated',?7,?7)",
-            rusqlite::params![id, kind, from, to, title, body, now],
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)",
+            rusqlite::params![id, kind, from, to, title, body, model, now],
         )?;
         Ok(())
     })?;

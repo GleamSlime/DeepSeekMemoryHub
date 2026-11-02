@@ -793,6 +793,46 @@ pub fn is_ignored(db: &Db, channel: &str, account: &str) -> Result<bool> {
     })
 }
 
+/// 在这句话里被提到的、**并且有印象**的人：返回 `(显示名, 印象)`。
+///
+/// 「被提到」的判据与称呼对照一致（显示名或任一场景称呼出现在这句话里），
+/// 但**额外要求有印象** —— 没有印象的人不该产生一个空段落。
+pub fn impressions_mentioned(db: &Db, text: &str, limit: usize) -> Result<Vec<(String, String)>> {
+    let t = text.trim();
+    if t.chars().count() < 2 || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let persons = persons_mentioned(db, t, 40)?;
+    if persons.is_empty() {
+        return Ok(Vec::new());
+    }
+    db.with_read(|c| {
+        let mut out = Vec::new();
+        for p in persons {
+            // persons_mentioned 返回 (显示名, 各场景称呼)，第一个是名字
+            let (display, _aliases) = p;
+            let imp: Option<String> = c
+                .query_row(
+                    "SELECT r.impression FROM relation r
+                     JOIN person p ON p.person_id = r.person_id
+                     WHERE p.display_name = ?1
+                     LIMIT 1",
+                    rusqlite::params![&display],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten();
+            if let Some(i) = imp.filter(|x| !x.trim().is_empty()) {
+                out.push((display, i));
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    })
+}
+
 /// 按「渠道 + 账号」查这个人的 person_id。找不到返回 `None`。
 ///
 /// 与 `is_ignored` 同一张表，但用途不同：那个回答「要不要理他」，
@@ -1024,6 +1064,8 @@ pub struct RelationItem {
     pub last_met_ms: i64,
     /// 亲密度阶段的中文说法，与 Java 侧 `CompanionPrompt.stageFor` 同义。
     pub stage: String,
+    /// 对这个人**更新后的印象**（主观判断，面板上能看到「它怎么想我」）。
+    pub impression: Option<String>,
     /// 这个人各「场景」里的称呼（MC / QQ 私聊 / QQ 群 / 直播间）。
     pub scenes: Vec<SceneItem>,
 }
@@ -1190,7 +1232,7 @@ pub fn relations(db: &Db) -> Result<Vec<RelationItem>> {
     db.with_read(|c| {
         let mut stmt = c.prepare(
             "SELECT r.person_id, p.display_name, r.familiarity, r.trust, r.closeness,
-                    r.note, r.first_met_ms, r.last_met_ms
+                    r.note, r.first_met_ms, r.last_met_ms, r.impression
              FROM relation r LEFT JOIN person p ON p.person_id = r.person_id
              ORDER BY r.closeness DESC LIMIT 200",
         )?;
@@ -1206,6 +1248,7 @@ pub fn relations(db: &Db) -> Result<Vec<RelationItem>> {
                     note: r.get(5)?,
                     first_met_ms: r.get(6)?,
                     last_met_ms: r.get(7)?,
+                    impression: r.get(8)?,
                     stage: closeness_stage(closeness),
                     scenes: Vec::new(),
                 })

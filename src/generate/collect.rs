@@ -221,7 +221,8 @@ fn gather_relations(db: &Db, since_ms: i64) -> Result<Vec<crate::generate::tick:
     db.with_read(|c| {
         // 取所有已建立关系的人（关系只在首次接触时建，建了就一直在）
         let mut stmt = c.prepare(
-            "SELECT r.person_id, p.display_name, r.familiarity, r.trust, r.closeness
+            "SELECT r.person_id, p.display_name, r.familiarity, r.trust, r.closeness,
+                    r.impression
              FROM relation r
              JOIN person p ON p.person_id = r.person_id
              ORDER BY r.closeness DESC, r.person_id ASC",
@@ -234,10 +235,11 @@ fn gather_relations(db: &Db, since_ms: i64) -> Result<Vec<crate::generate::tick:
                 r.get::<_, i64>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, i64>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })?;
         for row in rows {
-            let (pid, name, fam, trust, close) = row?;
+            let (pid, name, fam, trust, close, impression) = row?;
             // 这个人的账号（用来对上发言数）
             let n = db
                 .with_read(|c2| {
@@ -258,6 +260,7 @@ fn gather_relations(db: &Db, since_ms: i64) -> Result<Vec<crate::generate::tick:
                 trust,
                 closeness: close,
                 said: n,
+                impression,
             });
         }
         Ok(out)
@@ -312,7 +315,13 @@ pub fn ensure_relation(db: &Db, person_id: &str) -> Result<bool> {
 /// 用户明确要求「不走降低衰减」：关系不该因为「最近没怎么聊」自己掉，
 /// 只有具体的事（被冒犯、被欺骗）才会让它降，而那由模型显式给出负增量。
 pub fn apply_relation_delta(db: &Db, d: &crate::generate::tick::RelationDelta) -> Result<bool> {
-    if d.familiarity == 0 && d.trust == 0 && d.closeness == 0 {
+    // 数值没变但印象变了，也要落库（印象是独立的一维）
+    let has_impression = d
+        .impression
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if d.familiarity == 0 && d.trust == 0 && d.closeness == 0 && !has_impression {
         return Ok(false);
     }
     let now = crate::db::now_ms();
@@ -322,9 +331,18 @@ pub fn apply_relation_delta(db: &Db, d: &crate::generate::tick::RelationDelta) -
                familiarity = MIN(100, MAX(0, familiarity + ?1)),
                trust       = MIN(100, MAX(0, trust + ?2)),
                closeness   = MIN(100, MAX(0, closeness + ?3)),
-               last_met_ms = ?4
-             WHERE person_id = ?5",
-            rusqlite::params![d.familiarity, d.trust, d.closeness, now, d.person_id],
+               last_met_ms = ?4,
+               impression = COALESCE(?5, impression),
+               impression_ms = CASE WHEN ?5 IS NULL THEN impression_ms ELSE ?4 END
+             WHERE person_id = ?6",
+            rusqlite::params![
+                d.familiarity,
+                d.trust,
+                d.closeness,
+                now,
+                d.impression.as_deref().filter(|x| !x.trim().is_empty()),
+                d.person_id
+            ],
         )?;
         if n == 0 {
             return Ok(false);
@@ -809,6 +827,7 @@ mod tests {
             trust: 3,
             closeness: 3,
             reason: "一起盖房子".into(),
+            impression: None,
         };
         assert!(apply_relation_delta(&db, &d).unwrap());
         let (f, c): (i64, i64) = db
@@ -830,6 +849,7 @@ mod tests {
             trust: 0,
             closeness: 0,
             reason: String::new(),
+            impression: None,
         };
         assert!(
             !apply_relation_delta(&db, &zero).unwrap(),
@@ -848,6 +868,7 @@ mod tests {
             trust: -5,
             closeness: -5,
             reason: "被冒犯".into(),
+            impression: None,
         };
         apply_relation_delta(&db, &neg).unwrap();
         let (f2, c2v): (i64, i64) = db

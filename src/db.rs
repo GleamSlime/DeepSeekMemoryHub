@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 ///
 /// 变更规则：**只增不减**。老版本读到比自己新的库必须拒绝启动，
 /// 而不是「尽力而为」——用旧代码写新库会静默丢字段。
-pub const SCHEMA_VERSION: i32 = 22;
+pub const SCHEMA_VERSION: i32 = 23;
 
 /// 数据库句柄。
 ///
@@ -292,6 +292,20 @@ impl Db {
             // 「不要说出你对他的印象」—— 那是内部参考，说出来会很冒犯。
             add_column_if_missing(tx, "relation", "impression", "TEXT")?;
             add_column_if_missing(tx, "relation", "impression_ms", "INTEGER")?;
+
+            // 性别。**默认 `unknown`**，不是猜的。
+            //
+            // 为什么需要它：中文里「他/她」必须选一个，而这个选择会影响
+            // 回复的语气（对「她」和对「他」，同样一句「你别闹」分寸不同）。
+            // 之前没有这个字段，模型只能**随机**挑一个 —— 用户的原话是
+            // 「目前上下文的他完全随机的特别奇怪」。
+            //
+            // 为什么默认 unknown 而不是空串：空串会让「没填」和「填了空」
+            // 无法区分，而这里要的语义是**明确的第三种状态** ——
+            // 不知道就用「TA」，这比猜一个更诚实。
+            //
+            // 值时允许：`unknown` / `male` / `female` / `other`
+            add_column_if_missing(tx, "person", "gender", "TEXT")?;
 
             // ---------------------------------------------------------- 去重索引
             //

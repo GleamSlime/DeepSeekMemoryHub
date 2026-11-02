@@ -257,10 +257,16 @@ mod tests {
     use super::*;
 
     fn tmp() -> std::path::PathBuf {
+        // **必须带计数器**：只用 now_ms() 的话，同一毫秒里两个测试指向同一个目录，
+        // 互相覆盖对方的包 —— 症状是「单跑过、一起跑随机挂」。
+        // 这已经是第二次踩（第一次在 generate::runner），所以这里也钉一句。
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let d = std::env::temp_dir().join(format!(
-            "snaptest-{}-{}",
+            "snaptest-{}-{}-{}",
             std::process::id(),
-            crate::db::now_ms()
+            crate::db::now_ms(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();

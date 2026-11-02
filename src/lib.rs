@@ -19,6 +19,7 @@ pub mod config;
 pub mod context;
 pub mod db;
 pub mod error;
+pub mod gender;
 pub mod generate;
 pub mod http;
 pub mod image;

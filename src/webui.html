@@ -958,6 +958,18 @@ async function renderTable(c, page){
         </span>
       </div>
       <div class="editrow">
+        <label>性别 <span class="dim">上下文的代词按这里来：未知用「TA」</span></label>
+        <span class="seg" id="psGender">
+          <button data-v="unknown" class="${(p.gender||'unknown')==='unknown'?'on':''}">未知</button>
+          <button data-v="male" class="${p.gender==='male'?'on':''}">男</button>
+          <button data-v="female" class="${p.gender==='female'?'on':''}">女</button>
+          <button data-v="other" class="${p.gender==='other'?'on':''}">其它</button>
+        </span>
+        <span class="dim" style="font-size:11px;margin-top:4px">
+          不填就是<b>未知</b> —— 那时用「TA」，不猜。猜错会同时冒犯人和带偏语气。
+        </span>
+      </div>
+      <div class="editrow">
         <label>身份备注 <span class="dim">（这人是谁；关系里发生的事写在关系页）</span></label>
         <input id="psNote" value="${esc(p.note||'')}" placeholder="可空，例如「服务器服主」">
       </div>
@@ -1021,6 +1033,9 @@ async function renderTable(c, page){
      <button id="psBind">绑定账号</button>
      <span class="sp"></span>`);
 
+    $('psGender').querySelectorAll('button').forEach(b=>{
+      b.onclick=()=>{$('psGender').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+    });
     $('psIgnored').querySelectorAll('button').forEach(b=>{
       b.onclick=()=>{$('psIgnored').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
     });
@@ -1044,6 +1059,7 @@ async function renderTable(c, page){
             status: st ? st.dataset.v : undefined,
             note: $('psNote').value,
             ignored: ig ? ig.dataset.v==='1' : undefined,
+            gender: (($('psGender').querySelector('button.on')||{}).dataset||{}).v,
             scenes
           })});
         if(!r.ok){ let m=r.status+''; try{const j=await r.json(); if(j.error)m=j.error;}catch(_){} toast('保存失败：'+m,true); return; }

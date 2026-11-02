@@ -2140,6 +2140,11 @@ struct PersonPatch {
     /// 各场景里的称呼（mc/qq/qq_group/live）。空串 = 删掉人工值、回落自动推导。
     /// 场景称呼的编辑入口在这里（身份），关系页只读展示。
     scenes: Option<std::collections::HashMap<String, String>>,
+    /// 性别：`unknown` / `male` / `female` / `other`。
+    ///
+    /// **默认 unknown**，未知时代词用「TA」。这不是「懒得填」的兜底 ——
+    /// 中文里「他/她」必须选一个，猜一个会同时冒犯人和带偏语气。
+    gender: Option<String>,
 }
 
 /// 改身份。可以改显示名、状态、备注。
@@ -2158,6 +2163,22 @@ async fn api_patch_person(
     if let Some(scenes) = &p.scenes {
         check_scenes(scenes)?;
     }
+    // 性别：认不出的值当场拒（而不是静默当 unknown —— 那样拼错了永远发现不了）
+    let gender = match p.gender.as_deref() {
+        None => None,
+        Some(g) => {
+            let parsed = crate::gender::Gender::parse(g);
+            if parsed == crate::gender::Gender::Unknown && !g.trim().is_empty() {
+                let t = g.trim().to_ascii_lowercase();
+                if t != "unknown" && t != "未知" && !t.is_empty() {
+                    return Err(Error::BadRequest(format!(
+                        "性别只能是 unknown / male / female / other，收到 {g}"
+                    )));
+                }
+            }
+            Some(parsed.as_str().to_string())
+        }
+    };
     let db = st.app.db.clone();
     let id2 = id.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -2175,14 +2196,16 @@ async fn api_patch_person(
                    display_name = COALESCE(?1, display_name),
                    status       = COALESCE(?2, status),
                    note         = COALESCE(?3, note),
-                   ignored      = COALESCE(?5, ignored)
+                   ignored      = COALESCE(?5, ignored),
+                   gender       = COALESCE(?6, gender)
                  WHERE person_id = ?4",
                 rusqlite::params![
                     p.display_name,
                     p.status,
                     p.note,
                     id2,
-                    p.ignored.map(|b| b as i64)
+                    p.ignored.map(|b| b as i64),
+                    gender
                 ],
             )?;
             if let Some(scenes) = &p.scenes {

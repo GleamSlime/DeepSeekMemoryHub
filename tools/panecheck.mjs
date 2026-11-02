@@ -26,7 +26,7 @@ const js = html.split('<script>')[1].split('</script>')[0];
 // ---------------------------------------------------------------- 假数据
 const REL = {
   items: [{
-    person_id: 'p-gleam', display_name: 'Gleam', familiarity: 5, trust: 3, closeness: 20,
+    person_id: 'p-gleam', display_name: 'Gleam', gender: 'female', familiarity: 5, trust: 3, closeness: 20,
     note: '一起挖过矿', first_met_ms: 1000, last_met_ms: 2000, stage: '认识',
     impression: '爱下指令、欠着大白米饭，却让人没法真跟她置气', impression_ms: 1700000000000,
     scenes: [
@@ -97,10 +97,30 @@ function scanIds(html) {
     const id = m[1];
     if (!els.has(id)) els.set(id, mkEl(id));
   }
-  const chips = html.match(/id="relChips"[^>]*>([\s\S]*?)<\/div>/);
-  if (chips && els.get('relChips')) els.get('relChips')._h = chips[1];
-  const mode = html.match(/id="relMode"[^>]*>([\s\S]*?)<\/span>/);
-  if (mode && els.get('relMode')) els.get('relMode')._h = mode[1];
+  // 每个「分段选择器」容器（<span class="seg" id="xxx">…</span>）
+  // 要把自己内部的 HTML 记下来，否则 `$('psGender').querySelectorAll('button')`
+  // 拿到的是**整页**的按钮，而不是这个容器里的 —— 于是「选中项」永远判错。
+  //
+  // 早期只硬编码了 relChips / relMode 两个，其它容器全是空壳；
+  // 身份抽屉的性别、状态、忽视三个选择器都因此测不出东西。
+  for (const m of html.matchAll(/<span[^>]*class="seg"[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/span>/g)) {
+    const el = els.get(m[1]);
+    if (el) el._h = m[2];
+  }
+  // 兼容旧写法（id 在 class 之前）
+  for (const m of html.matchAll(/<span[^>]*id="([^"]+)"[^>]*class="seg"[^>]*>([\s\S]*?)<\/span>/g)) {
+    const el = els.get(m[1]);
+    if (el) el._h = m[2];
+  }
+  // 非 seg 的容器（身份多选 chips 之类）也要有自己那份 HTML。
+  // 这些没有统一的 class 约定，按「已知的容器 id」列一遍 ——
+  // 比再写一个正则去猜「这个 div 什么时候结束」更可靠。
+  for (const id of ['relChips', 'relMode', 'psStatus', 'psIgnored', 'psGender', 'bindCh', 'npStatus', 'perEnabled', 'vRate']) {
+    const re = new RegExp(`id="${id}"[^>]*>([\\s\\S]*?)</(?:div|span)>`);
+    const m = html.match(re);
+    const el = els.get(id);
+    if (m && el) el._h = m[1];
+  }
 }
 
 function mkEl(id) {
@@ -111,7 +131,17 @@ function mkEl(id) {
     get value() { return this._v; },
     set value(v) { this._v = String(v); },
     textContent: '', placeholder: '', style: {}, disabled: false,
-    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    // classList **必须真的记账**：面板里大量用「哪个按钮带 .on」表示当前选中项，
+    // 早期这里是空实现（add/remove 什么都不做、contains 恒 false），
+    // 于是「切到某个选项再保存」的判据永远测不出东西 —— 请求体里那个字段
+    // 永远是 undefined，而测试只看到「没抛异常」就通过了。
+    classList: {
+      _set: new Set(),
+      add(c) { this._set.add(c); },
+      remove(c) { this._set.delete(c); },
+      toggle(c) { this._set.has(c) ? this._set.delete(c) : this._set.add(c); },
+      contains(c) { return this._set.has(c); },
+    },
     dataset: {}, appendChild() {}, addEventListener() {},
     querySelector(sel) {
       const all = this.querySelectorAll ? this.querySelectorAll('button') : [];
@@ -238,14 +268,28 @@ ok(idrawer.includes('id="psSc_mc"'), '身份抽屉有 MC 称呼输入');
 ok(idrawer.includes('id="psSc_qq_group"'), '身份抽屉有 QQ 群称呼输入');
 ok(idrawer.includes('群里的Gleam'), '人工设置的名字带出到输入框');
 ok(idrawer.includes('当前自动：Gleam'), '自动推导值作为提示');
+ok(idrawer.includes('id="psGender"'), '身份抽屉有性别选择');
+ok(idrawer.includes('data-v="unknown"'), '性别有「未知」选项');
+ok(idrawer.includes('未知用「TA」') || idrawer.includes('TA'), '说明未知时用 TA');
 
-// 4. 身份抽屉保存：带 scenes
+// 4. 身份抽屉保存：带 scenes 与 gender
 get('psSc_qq_group').value = '';
 get('psSc_live').value = '直播间的Gleam';
+// 把性别切到「女」
+vm.runInContext(`
+  (()=>{
+    const bs = $('psGender').querySelectorAll('button');
+    bs.forEach(x=>x.classList.remove('on'));
+    const f = bs.find(b=>b.dataset.v==='female');
+    if (f) f.classList.add('on');
+  })()
+`, ctx);
 await get('psSave').onclick();
 const ppatch = calls.filter((c) => c.method === 'PATCH').pop();
 const ppb = ppatch ? JSON.parse(ppatch.body) : {};
 ok(ppatch.url.includes('/api/admin/person/p-gleam'), '身份保存打到 person 接口');
+
+ok(ppb.gender === 'female', '请求体带性别');
 ok(ppb.scenes && ppb.scenes.qq_group === '', '清空的场景传空串（后端回退自动）');
 ok(ppb.scenes && ppb.scenes.live === '直播间的Gleam', '新场景称呼进请求体');
 

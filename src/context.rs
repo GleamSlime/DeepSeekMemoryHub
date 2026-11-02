@@ -496,10 +496,27 @@ pub fn render_images(rows: &[(Option<String>, Option<String>)]) -> Option<String
 /// 它是**分寸的来源**：面对「爱开玩笑的人」和「说话很认真的人」，
 /// 同样一句「你又来了」是两种语气。而数值（熟悉/信任/亲密）说不出这个。
 pub fn render_impressions(rows: &[(String, String)]) -> Option<String> {
+    render_impressions_with_gender(
+        &rows
+            .iter()
+            .map(|(n, i)| (n.clone(), i.clone(), crate::gender::Gender::Unknown))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// 带性别版：印象文案里若出现「他/她」的错用，这里给的代词是权威口径。
+pub fn render_impressions_with_gender(rows: &[ImpressionRow]) -> Option<String> {
     let lines: Vec<String> = rows
         .iter()
-        .filter(|(_, imp)| !imp.trim().is_empty())
-        .map(|(name, imp)| format!("- {name}：{}", imp.trim()))
+        .filter(|(_, imp, _)| !imp.trim().is_empty())
+        .map(|(name, imp, g)| {
+            let p = match g {
+                crate::gender::Gender::Male => "他",
+                crate::gender::Gender::Female => "她",
+                _ => "TA",
+            };
+            format!("- {name}（{p}）：{}", imp.trim())
+        })
         .collect();
     if lines.is_empty() {
         return None;
@@ -587,8 +604,32 @@ pub fn render_images_with_ids(
 /// 输入 `(显示名, [(场景名, 该场景称呼)])`，场景名用「QQ 群叫」「MC 里叫」这种口语。
 /// 没有任何别名（所有场景都等于显示名）时该行省略；整段为空就返回 None。
 pub fn render_names(rows: &[(String, Vec<(String, String)>)]) -> Option<String> {
+    render_names_with_gender(
+        &rows
+            .iter()
+            .map(|(d, a)| (d.clone(), a.clone(), crate::gender::Gender::Unknown))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// 「提到的人」的渲染输入：`(显示名, 各场景称呼, 性别)`。
+pub type NamesRow = (String, Vec<(String, String)>, crate::gender::Gender);
+
+/// 「印象」的渲染输入：`(显示名, 印象, 性别)`。
+pub type ImpressionRow = (String, String, crate::gender::Gender);
+
+/// 同 `render_names`，但带性别 → **告诉模型该用哪个代词**。
+///
+/// 为什么要在这里说：中文里「他/她」必须选一个，而模型看不到人的样子。
+/// 之前没这个字段，它只能随机挑，用户的原话是
+/// 「目前上下文的他完全随机的特别奇怪」。
+///
+/// 未知一律写 **TA**，并且明说「性别未知」—— 这比让它猜更诚实，
+/// 也让它在别的句子（比如印象、关系理由）里沿用同一个代词。
+pub fn render_names_with_gender(rows: &[NamesRow]) -> Option<String> {
+    use crate::gender::Gender;
     let mut lines: Vec<String> = Vec::new();
-    for (display, aliases) in rows {
+    for (display, aliases, gender) in rows {
         let parts: Vec<String> = aliases
             .iter()
             .filter(|(_, name)| !name.trim().is_empty() && name != display)
@@ -597,13 +638,20 @@ pub fn render_names(rows: &[(String, Vec<(String, String)>)]) -> Option<String> 
         if parts.is_empty() {
             continue;
         }
-        lines.push(format!("- {display}：{}", parts.join("、")));
+        // 代词只在**确定**时才给具体值；未知就说「性别未知，用 TA」
+        let pronoun = match gender {
+            Gender::Male => "（他）".to_string(),
+            Gender::Female => "（她）".to_string(),
+            _ => "（性别未知，用 TA）".to_string(),
+        };
+        lines.push(format!("- {display}{pronoun}：{}", parts.join("、")));
     }
     if lines.is_empty() {
         return None;
     }
     Some(format!(
-        "# 称呼对照\n同一个人在不同地方叫法不同，别当成两个人：\n{}",
+        "# 称呼对照\n同一个人在不同地方叫法不同，别当成两个人；\n\
+         提到他们时请用括号里的代词，别猜：\n{}",
         lines.join("\n")
     ))
 }
@@ -873,9 +921,15 @@ mod tests {
             ),
         ];
         let t = render_group(&rows).unwrap();
+        // 段落头带一句「「我」指说话人」的说明（2026-11-02 线上事故加的，
+        // 见 `render_group` 的注释）。断言要跟着更新 —— 但**只断言我们关心的
+        // 那部分**：行顺序与内容。整串相等会让每次改提示文案都误报一次。
+        assert!(t.starts_with("# 群里最近说的话"), "{t}");
+        let lines: Vec<&str> = t.lines().filter(|l| l.starts_with("- ")).collect();
         assert_eq!(
-            t,
-            "# 群里最近说的话\n- 小明：明天我去看你钓鱼啊\n- ***7890：你昨天挖到什么了"
+            lines,
+            vec!["- 小明：明天我去看你钓鱼啊", "- ***7890：你昨天挖到什么了"],
+            "正序拼接且格式不变：{t}"
         );
     }
 

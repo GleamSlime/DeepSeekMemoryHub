@@ -2176,9 +2176,9 @@ async fn get_context(
         // 为什么不把所有身份都列出来：上下文每轮都发，整张 person 表既费 token，
         // 也会让模型把不相干的人扯进来。触发词就是这句话里出现的名字
         // （显示名或任一场景称呼，≥2 字且无歧义）。
-        match crate::query::persons_mentioned(&db, &needle, 3) {
+        match crate::query::persons_mentioned_with_gender(&db, &needle, 3) {
             Ok(rows) => push(
-                crate::context::render_names(&rows),
+                crate::context::render_names_with_gender(&rows),
                 crate::context::SEG_NAMES,
             ),
             Err(e) => notes.push(format!("names: 读取失败（{e}）")),
@@ -2188,9 +2188,9 @@ async fn get_context(
         //
         // 与称呼对照同一套「按需触发」：整张关系表每轮都发是白花 token，
         // 而没提到的人，印象对这句话也没有帮助。
-        match crate::query::impressions_mentioned(&db, &needle, 3) {
+        match crate::query::impressions_mentioned_gendered(&db, &needle, 3) {
             Ok(rows) => push(
-                crate::context::render_impressions(&rows),
+                crate::context::render_impressions_with_gender(&rows),
                 crate::context::SEG_IMPRESSIONS,
             ),
             Err(e) => notes.push(format!("impressions: 读取失败（{e}）")),

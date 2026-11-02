@@ -416,6 +416,9 @@ pub struct PersonItem {
     pub scenes: Vec<SceneItem>,
     /// 忽视：这个人的请求不回复、不入库（见 `is_ignored`）。
     pub ignored: bool,
+    /// 性别（`unknown`/`male`/`female`/`other`）。**默认 unknown**，
+    /// 未知时代词用「TA」而不是猜一个。
+    pub gender: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -447,7 +450,8 @@ pub fn persons(db: &Db, q: Option<&str>, p: Page) -> Result<Paged<PersonItem>> {
         all.push(Box::new(p.offset()));
 
         let mut stmt = c.prepare(&format!(
-            "SELECT person_id, display_name, status, created_ms, note, ignored
+            "SELECT person_id, display_name, status, created_ms, note, ignored,
+                    COALESCE(gender,'unknown')
              FROM person {where_sql} ORDER BY created_ms DESC LIMIT ? OFFSET ?"
         ))?;
         let mut items = stmt
@@ -463,6 +467,7 @@ pub fn persons(db: &Db, q: Option<&str>, p: Page) -> Result<Paged<PersonItem>> {
                         accounts: Vec::new(),
                         scenes: Vec::new(),
                         ignored: r.get::<_, i64>(5)? != 0,
+                        gender: r.get(6)?,
                     })
                 },
             )?
@@ -797,6 +802,32 @@ pub fn is_ignored(db: &Db, channel: &str, account: &str) -> Result<bool> {
 ///
 /// 「被提到」的判据与称呼对照一致（显示名或任一场景称呼出现在这句话里），
 /// 但**额外要求有印象** —— 没有印象的人不该产生一个空段落。
+/// 带性别版：印象在上下文里要能写出正确的代词。
+pub fn impressions_mentioned_gendered(
+    db: &Db,
+    text: &str,
+    limit: usize,
+) -> Result<Vec<(String, String, crate::gender::Gender)>> {
+    let base = impressions_mentioned(db, text, limit)?;
+    if base.is_empty() {
+        return Ok(Vec::new());
+    }
+    db.with_read(|c| {
+        let mut out = Vec::with_capacity(base.len());
+        for (name, imp) in base {
+            let g: String = c
+                .query_row(
+                    "SELECT COALESCE(gender,'unknown') FROM person WHERE display_name = ?1 LIMIT 1",
+                    rusqlite::params![&name],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| "unknown".into());
+            out.push((name, imp, crate::gender::Gender::parse(&g)));
+        }
+        Ok(out)
+    })
+}
+
 pub fn impressions_mentioned(db: &Db, text: &str, limit: usize) -> Result<Vec<(String, String)>> {
     let t = text.trim();
     if t.chars().count() < 2 || limit == 0 {
@@ -1472,6 +1503,38 @@ pub(crate) fn sender_display_names(c: &rusqlite::Connection) -> Result<SenderNam
 /// 调用方据此往上下文里加一小段「称呼对照」，而不是把所有人的关系都塞进去。
 /// 同一个名字指向两个人时视为歧义、不作为触发词（与 `name_mappings` 同一套口径）。
 pub type PersonNames = (String, Vec<(String, String)>);
+
+/// 带性别版本的「这句话提到的人」：`(显示名, 各场景称呼, 性别)`。
+///
+/// 为什么单独一个函数而不是改 `PersonNames`：调用点很多，
+/// 大部分不需要性别；改元组会让十几处一起动，容易改错。
+pub type PersonNamesG = (String, Vec<(String, String)>, crate::gender::Gender);
+
+pub fn persons_mentioned_with_gender(
+    db: &Db,
+    text: &str,
+    limit: usize,
+) -> Result<Vec<PersonNamesG>> {
+    // 复用现有实现拿到名字，再补一次性别查询（人少，不构成 N+1 问题）
+    let base = persons_mentioned(db, text, limit)?;
+    if base.is_empty() {
+        return Ok(Vec::new());
+    }
+    db.with_read(|c| {
+        let mut out = Vec::with_capacity(base.len());
+        for (display, aliases) in base {
+            let g: String = c
+                .query_row(
+                    "SELECT COALESCE(gender,'unknown') FROM person WHERE display_name = ?1 LIMIT 1",
+                    rusqlite::params![&display],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| "unknown".into());
+            out.push((display, aliases, crate::gender::Gender::parse(&g)));
+        }
+        Ok(out)
+    })
+}
 
 pub fn persons_mentioned(db: &Db, text: &str, limit: usize) -> Result<Vec<PersonNames>> {
     let trimmed = text.trim();

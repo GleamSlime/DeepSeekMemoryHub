@@ -1066,6 +1066,8 @@ pub struct RelationItem {
     pub stage: String,
     /// 对这个人**更新后的印象**（主观判断，面板上能看到「它怎么想我」）。
     pub impression: Option<String>,
+    /// 印象最后一次变化的时间（面板显示「模型上次更新」）。
+    pub impression_ms: Option<i64>,
     /// 这个人各「场景」里的称呼（MC / QQ 私聊 / QQ 群 / 直播间）。
     pub scenes: Vec<SceneItem>,
 }
@@ -1232,7 +1234,7 @@ pub fn relations(db: &Db) -> Result<Vec<RelationItem>> {
     db.with_read(|c| {
         let mut stmt = c.prepare(
             "SELECT r.person_id, p.display_name, r.familiarity, r.trust, r.closeness,
-                    r.note, r.first_met_ms, r.last_met_ms, r.impression
+                    r.note, r.first_met_ms, r.last_met_ms, r.impression, r.impression_ms
              FROM relation r LEFT JOIN person p ON p.person_id = r.person_id
              ORDER BY r.closeness DESC LIMIT 200",
         )?;
@@ -1249,6 +1251,7 @@ pub fn relations(db: &Db) -> Result<Vec<RelationItem>> {
                     first_met_ms: r.get(6)?,
                     last_met_ms: r.get(7)?,
                     impression: r.get(8)?,
+                    impression_ms: r.get(9)?,
                     stage: closeness_stage(closeness),
                     scenes: Vec::new(),
                 })

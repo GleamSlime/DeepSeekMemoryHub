@@ -28,6 +28,7 @@ const REL = {
   items: [{
     person_id: 'p-gleam', display_name: 'Gleam', familiarity: 5, trust: 3, closeness: 20,
     note: '一起挖过矿', first_met_ms: 1000, last_met_ms: 2000, stage: '认识',
+    impression: '爱下指令、欠着大白米饭，却让人没法真跟她置气', impression_ms: 1700000000000,
     scenes: [
       { scene: 'mc', label: 'MC 里', name: 'Gleam', source: 'derived', hint: 'uuid-gleam' },
       { scene: 'qq', label: 'QQ 私聊', name: 'Gleam', source: 'derived', hint: '10001' },
@@ -157,6 +158,15 @@ const ctx = {
     let data = { ok: true, items: [], total: 0, page: 1, pages: 1, size: 20 };
     if (last === 'relations') data = REL;
     else if (last === 'persons') data = PERSONS;
+    else if (last === 'backfill') {
+      // 回溯接口：返回一个人的新印象（面板要回填到输入框）
+      data = {
+        ok: true,
+        done: [{ person_id: 'p-gleam', impression: '新生成的印象' }],
+        skipped: [],
+        failed: [],
+      };
+    }
     return { ok: true, status: 200, json: async () => data, text: async () => JSON.stringify(data) };
   },
   encodeURIComponent, decodeURIComponent, URLSearchParams,
@@ -187,15 +197,38 @@ ok(!drawer.includes('id="relSc_'), '抽屉不再提供场景称呼输入（归�
 ok(drawer.includes('群里的Gleam'), '场景称呼仍然只读展示');
 ok(get('drawerFoot').innerHTML.includes('去身份页改称呼与账号'), '有跳去身份页的按钮');
 
+ok(drawer.includes('id="relImp"'), '抽屉有印象输入框（能看能改）');
+ok(drawer.includes('id="relImpGen"'), '抽屉有「按历史重新生成」按钮');
+ok(drawer.includes('爱下指令'), '当前印象预填进输入框');
+
 get('relClo').value = '75';
 get('relNote').value = '一起盖过房';
+get('relImp').value = '我手改的印象';
 await get('relSave').onclick();
 const patch = calls.find((c) => c.method === 'PATCH');
 ok(!!patch, '保存发出 PATCH');
 const pb = patch ? JSON.parse(patch.body) : {};
 ok(pb.closeness === 75, '请求体带亲密度');
 ok(pb.note === '一起盖过房', '请求体带关系备注');
+ok(pb.impression === '我手改的印象', '请求体带印象（面板能改）');
 ok(pb.scenes === undefined && pb.display_name === undefined, '请求体不再混入身份字段');
+
+// 2.1 印象清空也要发（三态：空串 = 清空）
+vm.runInContext(`openRelationEdit(__rel)`, Object.assign(ctx, { __rel: REL.items[0] }));
+get('relImp').value = '';
+await get('relSave').onclick();
+const p2 = calls.filter((c) => c.method === 'PATCH').pop();
+const pb2 = p2 ? JSON.parse(p2.body) : {};
+ok(pb2.impression === '', '空串要发出去（= 清空印象），不是省略');
+
+// 2.2 重新生成：调回溯接口并回填输入框
+vm.runInContext(`openRelationEdit(__rel)`, Object.assign(ctx, { __rel: REL.items[0] }));
+await get('relImpGen').onclick();
+const gen = calls.find((c) => c.url && c.url.includes('impressions/backfill'));
+ok(!!gen, '重新生成调到回溯接口');
+const gb = gen ? JSON.parse(gen.body) : {};
+ok(gb.overwrite === true && gb.person_ids[0] === 'p-gleam', '只重算这一个人且允许覆盖');
+ok(get('relImp').value === '新生成的印象', '生成结果回填到输入框（还要人点保存）');
 
 // 3. 跳到身份页 → 自动打开那个人的抽屉
 vm.runInContext(`state.pendingPerson = 'p-gleam'; state.page='persons'; state.params={};`, ctx);

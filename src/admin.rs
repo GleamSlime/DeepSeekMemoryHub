@@ -1440,6 +1440,11 @@ struct RelationPatch {
     closeness: Option<i64>,
     /// `Some("")` = 清空；没有这个字段 = 不动。
     note: Option<String>,
+    /// 对他的**印象**（主观判断）。同样三态：没传=不动 / 空串=清空 / 有值=覆盖。
+    ///
+    /// 面板上能改它是必要的：模型生成的印象未必准，而它是会影响回复语气的 ——
+    /// 人必须能纠正「它误会我了」。
+    impression: Option<String>,
     scenes: Option<std::collections::HashMap<String, String>>,
 }
 
@@ -1485,19 +1490,36 @@ async fn api_patch_relation(
             // note 是三态：没传 = 不动；传空串 = 清空；传值 = 覆盖。
             let note_set = b.note.is_some();
             let note_val = b.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let imp_set = b.impression.is_some();
+            let imp_val = b
+                .impression
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            // 手工改的印象要查长度：它会每轮进上下文，长段落是长期负担
+            if let Some(v) = imp_val {
+                if v.chars().count() > 120 {
+                    return Err(Error::BadRequest("印象最长 120 字".into()));
+                }
+            }
             tx.execute(
                 "UPDATE relation SET
                    familiarity = COALESCE(?1, familiarity),
                    trust       = COALESCE(?2, trust),
                    closeness   = COALESCE(?3, closeness),
-                   note        = CASE WHEN ?4 THEN ?5 ELSE note END
-                 WHERE person_id = ?6",
+                   note        = CASE WHEN ?4 THEN ?5 ELSE note END,
+                   impression  = CASE WHEN ?6 THEN ?7 ELSE impression END,
+                   impression_ms = CASE WHEN ?6 AND ?7 IS NOT NULL THEN ?8 ELSE impression_ms END
+                 WHERE person_id = ?9",
                 rusqlite::params![
                     b.familiarity.map(score),
                     b.trust.map(score),
                     b.closeness.map(score),
                     note_set,
                     note_val,
+                    imp_set,
+                    imp_val,
+                    now,
                     id2
                 ],
             )?;

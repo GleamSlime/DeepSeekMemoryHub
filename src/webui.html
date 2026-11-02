@@ -1779,6 +1779,17 @@ function openRelationEdit(r){
     </p>
     <div class="editrow"><label>关系备注 <span class="dim">（怎么认识的、发生过什么）</span></label>
       <input id="relNote" value="${esc(r.note||'')}" placeholder="可空，例如「一起盖过房」"></div>
+    <div class="editrow">
+      <label>印象 <span class="dim">它心里怎么看这个人 —— 会进上下文影响回复语气，但**不会说出来**</span></label>
+      <textarea id="relImp" style="min-height:64px"
+        placeholder="一句话，例如「嘴上爱损人，但会主动帮忙，不用跟他客气」">${esc(r.impression||'')}</textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <button id="relImpGen">按历史记录重新生成</button>
+        <span class="dim" style="font-size:11.5px">
+          ${r.impression?`模型上次更新：${fmtAgo(r.impression_ms||0)}`:'还没有印象（可以手写，也可以让模型按历史生成）'}
+        </span>
+      </div>
+    </div>
     <div class="sectitle">关系数值 <span class="hint">0–100；20=认识 40=熟识 70=亲近 90=交心</span></div>
     <div class="editrow"><label>亲密度</label><input type="number" id="relClo" min="0" max="100" value="${r.closeness}"></div>
     <div class="editrow"><label>熟悉</label><input type="number" id="relFam" min="0" max="100" value="${r.familiarity}"></div>
@@ -1810,12 +1821,34 @@ function openRelationEdit(r){
     try{
       await apiDo('PATCH', `/api/admin/relations/${encodeURIComponent(r.person_id)}`, {
         note: $('relNote').value,
+        // 空串 = 清空（三态），这样「删掉一句写错的印象」也能生效
+        impression: $('relImp').value,
         familiarity: +($('relFam').value||0),
         trust: +($('relTru').value||0),
         closeness: +($('relClo').value||0)
       });
       toast('已保存'); closeDrawer(); render();
     }catch(e){ toast('保存失败：'+e.message, true); }
+  };
+  // 按历史重新生成（会覆盖输入框里的内容，所以先确认）
+  $('relImpGen').onclick=async()=>{
+    const cur=$('relImp').value.trim();
+    if(cur && !confirm('会按这个人的历史记录重写印象，覆盖现在输入框里的内容。继续？')) return;
+    const btn=$('relImpGen'); const old=btn.textContent;
+    btn.textContent='生成中…'; btn.disabled=true;
+    try{
+      const res=await apiDo('POST','/api/admin/relation/impressions/backfill',
+        {person_ids:[r.person_id], overwrite:true});
+      const one=(res.done||[])[0];
+      if(one){
+        $('relImp').value = one.impression || '';
+        toast('已生成，记得点保存');
+      } else {
+        const f=(res.failed||[])[0];
+        toast('生成失败：'+(f?f.error:'没有素材'), true);
+      }
+    }catch(e){ toast('生成失败：'+e.message, true); }
+    finally{ btn.textContent=old; btn.disabled=false; }
   };
 }
 

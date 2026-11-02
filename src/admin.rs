@@ -100,6 +100,10 @@ pub fn router(state: AdminState) -> Router {
         )
         .route("/api/admin/persona/preview", get(api_persona_preview))
         .route(
+            "/api/admin/persona/import",
+            axum::routing::post(api_import_persona),
+        )
+        .route(
             "/api/admin/channels/{tag}",
             axum::routing::patch(api_patch_channel).delete(api_delete_channel),
         )
@@ -513,6 +517,132 @@ async fn api_injections(
     Ok(Json(serde_json::json!({ "items": items })))
 }
 
+#[derive(Deserialize)]
+struct PersonaImportReq {
+    /// MC 那边的 NPC 档案路径（`shared/deepseek_mc/npcs/<名字>.json`）。
+    path: String,
+    /// 用这个正则匹配模型（留空 = 兜底）。
+    #[serde(default)]
+    model_regex: String,
+    /// 覆盖已有的同名人格。
+    #[serde(default)]
+    overwrite: bool,
+}
+
+/// 从 MC 的 NPC 档案导入人设。
+///
+/// # 为什么需要它
+///
+/// 中枢的 `persona` 表现在只有**标签**（`CETACEA_LOLI`、`PERSONALITY_TSUNDERE_SWEET`…），
+/// 而真正的人设在 MC 档案的顶层 `persona` 字段里 —— **1926 字**，
+/// 包括外貌、性子、对主人的态度、说话方式。手抄一遍既费事又会走样。
+///
+/// # 为什么不让生成任务直接读 MC 文件
+///
+/// 那会把中枢重新绑死到 MC 上 —— 而这一整轮改造的目的正是**解开这个依赖**
+/// （MC 不开机，日记/手帐/情绪全停）。所以只做一次性导入：
+/// 导入之后中枢自带人设，MC 关着也能正确生成。
+async fn api_import_persona(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Json(req): Json<PersonaImportReq>,
+) -> ApiResult<serde_json::Value> {
+    require_session(&st, &headers)?;
+
+    let path = std::path::PathBuf::from(req.path.trim());
+    if !path.is_file() {
+        return Err(Error::BadRequest(format!(
+            "文件不存在：{}（要填 MC 那边的 npcs/<名字>.json）",
+            path.display()
+        )));
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| Error::BadRequest(format!("读不了这个文件：{e}")))?;
+    let j: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| Error::BadRequest(format!("不是合法的 JSON：{e}")))?;
+
+    let body = j
+        .get("persona")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            Error::BadRequest("这个档案里没有 persona 字段（可能是个旧版档案）".into())
+        })?;
+    if body.chars().count() < 50 {
+        return Err(Error::BadRequest(
+            "persona 太短了（<50 字），可能是占位内容，不导入".into(),
+        ));
+    }
+    // 名字：优先 displayName，否则用文件名
+    let name = j
+        .get("displayName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "导入的人格".into())
+        });
+
+    let db = st.app.db.clone();
+    let body = body.to_string();
+    let re = req.model_regex.trim().to_string();
+    let overwrite = req.overwrite;
+    let path_display = path.display().to_string();
+    let out = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        let now = crate::db::now_ms();
+        db.with_write(|tx| {
+            // 同名的：覆盖或拒绝
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM persona WHERE name = ?1 LIMIT 1",
+                    rusqlite::params![&name],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(id) = existing {
+                if !overwrite {
+                    return Err(Error::BadRequest(format!(
+                        "已经有一条叫「{name}」的人格了。要覆盖就把 overwrite 打开"
+                    )));
+                }
+                tx.execute(
+                    "UPDATE persona SET body = ?1, model_regex = ?2, updated_ms = ?3 WHERE id = ?4",
+                    rusqlite::params![body, re, now, id],
+                )?;
+                return Ok(serde_json::json!({
+                    "ok": true, "id": id, "name": name, "chars": body.chars().count(),
+                    "updated": true,
+                }));
+            }
+            let id = format!("per-{}-{}", now, crate::http::rand_suffix());
+            tx.execute(
+                "INSERT INTO persona(id, name, model_regex, body, priority, enabled,
+                                     note, created_ms, updated_ms)
+                 VALUES (?1,?2,?3,?4,0,1,?5,?6,?6)",
+                rusqlite::params![
+                    id,
+                    name,
+                    re,
+                    body,
+                    format!("从 MC 档案导入：{}", path_display),
+                    now
+                ],
+            )?;
+            Ok(serde_json::json!({
+                "ok": true, "id": id, "name": name, "chars": body.chars().count(),
+                "updated": false,
+            }))
+        })
+    })
+    .await
+    .map_err(|e| Error::Storage(e.to_string()))??;
+    Ok(Json(out))
+}
+
 // ================================================================== LLM 配置
 
 async fn api_get_llm(
@@ -755,13 +885,22 @@ async fn api_backfill_impressions(
     let targets: Vec<String> = match req.person_ids {
         Some(v) if !v.is_empty() => v,
         _ => {
+            // 没指定人时选谁：
+            // - 默认（overwrite=false）→ 只补**还没有印象**的
+            // - overwrite=true → **全部重算**（用户想拿新的人设重刷一遍）
+            //   ⚠️ 之前这里恒为「只补空的」，于是 `{"overwrite":true}`
+            //   什么都不做、还返回 ok —— 最容易让人以为「生成成功了」。
             let db2 = db.clone();
+            let ow = req.overwrite;
             tokio::task::spawn_blocking(move || -> crate::error::Result<Vec<String>> {
                 db2.with_read(|cc| {
-                    let mut stmt = cc.prepare(
+                    let sql = if ow {
+                        "SELECT person_id FROM relation"
+                    } else {
                         "SELECT person_id FROM relation
-                         WHERE impression IS NULL OR TRIM(impression) = ''",
-                    )?;
+                         WHERE impression IS NULL OR TRIM(impression) = ''"
+                    };
+                    let mut stmt = cc.prepare(sql)?;
                     let v = stmt
                         .query_map([], |r| r.get::<_, String>(0))?
                         .collect::<std::result::Result<Vec<_>, _>>()?;

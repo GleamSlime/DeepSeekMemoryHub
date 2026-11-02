@@ -24,20 +24,66 @@ use crate::llm::{ChatMessage, Purpose};
 /// 每个人的素材上限（条）。
 const MAX_MATERIAL: usize = 60;
 
-const SYSTEM: &str = r#"你在帮一个角色形成对某个人的「印象」。
+/// 提示词模板。`{persona}` 处填入**这个角色是谁**。
+///
+/// # 为什么必须带人设（2026-11-02 实测踩过）
+///
+/// 第一版提示词写的是「你在帮**一个角色**形成印象」，没有告诉模型
+/// 这个角色是谁、什么性格、跟对方什么关系。结果生成出来的是
+/// **旁观者的客观评价**（「她是个爱下指令、爱改参数的主人」），
+/// 而不是**鲸鲸对这个人的看法** —— 用户的原话是「不符合人设」。
+///
+/// 差别在哪：「爱下指令」是观察，「主人又在瞎指挥，但我还是会去做」
+/// 才是带态度、带性格的印象。后者才会影响回复的语气。
+///
+/// # 人称也改了
+///
+/// 第一版要求「用第二人称视角写（他/她/这个人）」—— 这是**报道口吻**。
+/// 印象是「我心里怎么看他」，应该是**第一人称的心里话**：
+/// 可以叫「主人」「这家伙」，可以用角色自己的说话习惯。
+const SYSTEM_TMPL: &str = r#"你就是下面这个人，现在在心里琢磨「{who}」这个人。
 
-你会拿到：这个人和角色之间发生过的事、说过的话。
+## 你是谁
+{persona}
 
-请写出**角色对这个人**的印象，一句话，40 字以内。
+## 称呼规矩（很重要）
 
-要求：
-- 写的是**判断**，不是流水账：「嘴上爱损人，但会主动帮忙，不用跟他客气」
-- 具体、有性格，不要「是个好人」「很友好」这种空话
-- 只依据给的材料，**不要编造**
-- 用第二人称视角写（「他」/「她」/「这个人」）
-- **不要写你打算怎么对待他**，只写你怎么看他
+- 人设里说的「主人」是**一个人**，不是所有玩家都叫主人。
+  材料里那个和你关系最深、你叫「主人」的人只有一个；
+  **其他人就是群友/朋友，直接叫名字**（「鸡蛋大人」「小螺」），不要也叫主人。
+- 不确定时：叫名字永远不错，叫错「主人」很尴尬。
 
-直接输出那一句话，不要引号、不要解释。"#;
+## 要求
+
+写一句**你心里对他的印象**，40 字以内。
+
+- 用**你自己的口吻**写 —— 想叫「主人」就叫，想损就损，带上你的脾气。
+  这不是给外人看的评价，是你私下的判断。
+- 写**态度**，不是观察。
+  ❌「她是个爱下指令的人」（这是旁观者的观察）
+  ✅「主人又在瞎指挥，可我还是会去做的」（这是你的想法）
+- 只依据给的材料，**不要编造**没发生过的事。
+- 不要写成你要怎么对待他，只写你怎么看他。
+- 不要用「他/她/这个人」这种第三人称；用你最自然的称呼。
+- **自称统一用「我」或「鲸鲸」**，不要用「人家」——
+  那是回复阶段会被替换掉的词，写进印象会前后不一致。
+
+## 语气参照
+
+素材里的对话用的是角色平时的说话方式，**照着那个语气写**，
+不要切换成书面语或旁白腔。
+
+直接输出那一句话，不要引号、不要解释、不要「印象：」前缀。"#;
+
+/// 没有配置人设时的退化模板。
+///
+/// 保留它是因为：中枢刚接入 MC 时人格表可能是空的，
+/// 那时宁可给一个中性但能用的印象，也不要直接报错不生成。
+const SYSTEM_NO_PERSONA: &str = r#"你在为「{who}」写一句印象。
+
+你没有具体的人设资料，请用**第一人称**写一句你对他/她的看法，
+40 字以内，要有态度（不是客观观察），只依据给的材料、不要编造。
+直接输出那一句话。"#;
 
 /// 回溯一个人。返回 `Ok(true)` 表示真的写入了。
 pub async fn one(
@@ -61,6 +107,22 @@ pub async fn one(
             return Ok(false);
         }
     }
+
+    // 这个角色是谁 —— 印象必须站在**它自己**的立场上写，
+    // 而人设就存在 `persona` 表里（面板「人格」页编辑）。
+    //
+    // 取优先级最高的那条可用人格。和 `/v1/context` 用的是同一张表，
+    // 但不按模型正则匹配：这是后台生成任务，跟哪个模型在跑无关，
+    // 要的是「这个角色是什么样的人」。
+    let persona_text = db.with_read(|c| {
+        Ok(c.query_row(
+            "SELECT body FROM persona WHERE enabled = 1
+             ORDER BY priority DESC, created_ms DESC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok())
+    })?;
 
     let (name, material) = db.with_read(|c| {
         let name: String = c
@@ -139,8 +201,16 @@ pub async fn one(
 
     let client = runner::client(cfg);
     let t0 = std::time::Instant::now();
+    let sys = match persona_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        Some(p) => SYSTEM_TMPL.replace("{who}", &name).replace("{persona}", p),
+        None => SYSTEM_NO_PERSONA.replace("{who}", &name),
+    };
     let out = client
-        .chat(&[ChatMessage::system(SYSTEM), ChatMessage::user(user)])
+        .chat(&[ChatMessage::system(sys), ChatMessage::user(user)])
         .await?;
     let elapsed = t0.elapsed().as_millis() as i64;
 
@@ -151,8 +221,8 @@ pub async fn one(
         .trim_matches('「')
         .trim_matches('」')
         .to_string();
-    // 去掉可能的前缀
-    for p in ["印象：", "对", "他："] {
+    // 去掉可能的前缀（模型偶尔还是会加）
+    for p in ["印象：", "对", "他：", "她：", "我："] {
         if let Some(rest) = imp.strip_prefix(p) {
             if !rest.trim().is_empty() {
                 imp = rest.trim().to_string();
@@ -194,7 +264,36 @@ pub async fn one(
 
 #[cfg(test)]
 mod tests {
+    use super::{SYSTEM_NO_PERSONA, SYSTEM_TMPL};
     use crate::generate::runner::tests_support::fresh_db;
+
+    #[test]
+    fn 提示词必须带人设和称呼规矩() {
+        // 回归（2026-11-02 用户报「印象不符合人设」）：
+        // 第一版提示词只说「你在帮一个角色形成印象」，没告诉模型**这个角色是谁**，
+        // 生成出来是旁观者的客观评价，不是鲸鲸的看法。
+        assert!(SYSTEM_TMPL.contains("{persona}"), "要留人设插槽");
+        assert!(SYSTEM_TMPL.contains("{who}"), "要留名字插槽");
+        assert!(
+            SYSTEM_TMPL.contains("主人") && SYSTEM_TMPL.contains("不是所有玩家都叫主人"),
+            "必须区分「主人只有一个」——实测 5 个群友全被叫成主人"
+        );
+        assert!(
+            SYSTEM_TMPL.contains("人家"),
+            "要禁掉「人家」：回复阶段会被替换成「本鱼」，写进印象会前后不一致"
+        );
+        assert!(
+            SYSTEM_TMPL.contains("用**你自己的口吻**"),
+            "必须要求第一人称口吻，不能是报道腔"
+        );
+    }
+
+    #[test]
+    fn 没人设时有退化模板() {
+        // 人格表可能是空的（刚接入时），那时宁可给中性印象也不要报错不生成
+        assert!(SYSTEM_NO_PERSONA.contains("{who}"));
+        assert!(SYSTEM_NO_PERSONA.contains("第一人称"));
+    }
 
     #[test]
     fn 没有素材时拒绝而不是编造() {

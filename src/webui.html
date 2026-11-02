@@ -2058,6 +2058,7 @@ async function renderPersonas(c){
   <div class="tablewrap">
     <div class="tbl-head"><span class="t">人格</span>
       <span class="dim">共 ${items.length} 条</span><span class="sp"></span>
+      <button id="perImport">从 MC 档案导入</button>
       <button class="primary" id="perNew">+ 新增人格</button></div>
     ${items.length?`<div style="overflow-x:auto"><table><thead><tr>
       <th>名字</th><th>匹配的模型 id（正则）</th><th class="num">优先级</th>
@@ -2153,6 +2154,41 @@ async function renderPersonas(c){
   };
 
   $('perNew').onclick=()=>openEditor(null);
+  // 从 MC 的 npcs/<名>.json 导入人设正文。
+  // **只做一次性导入**，不让生成任务去读 MC 文件 ——
+  // 那会把中枢重新绑死到 MC 上，而这轮改造的目的正是解开这个依赖。
+  $('perImport').onclick=()=>{
+    showDrawer('从 MC 档案导入人设', `
+      <p class="dim" style="font-size:12px;margin:0 0 12px">
+        填 MC 那边的 NPC 档案路径（<code>shared/deepseek_mc/npcs/&lt;名字&gt;.json</code>）。
+        会读里面的顶层 <code>persona</code> 字段 —— 那才是完整人设，
+        中枢里的「正文」如果只有标签，印象和日记都会没味道。
+      </p>
+      <div class="editrow"><label>档案路径</label>
+        <input id="impPath" placeholder="/path/to/shared/deepseek_mc/npcs/大肥鱼.json"></div>
+      <div class="editrow"><label>匹配的模型 id（正则，可空 = 兜底）</label>
+        <input id="impRe" placeholder=".*?(dfmodel|deepseek-v4.1-flash)"></div>
+      <div class="editrow">
+        <label style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="impOw" style="width:auto"> 同名已存在时覆盖
+        </label>
+      </div>
+      <div id="impOut" class="dim" style="font-size:12px"></div>`,
+      `<button class="primary" id="impGo">导入</button><span class="sp"></span>`);
+    $('impGo').onclick=async()=>{
+      const o=$('impOut'); o.textContent='导入中…'; o.style.color='';
+      try{
+        const r=await apiDo('POST','/api/admin/persona/import',{
+          path:$('impPath').value.trim(),
+          model_regex:$('impRe').value.trim(),
+          overwrite:$('impOw').checked
+        });
+        o.textContent=`✓ 已导入「${r.name}」${r.chars} 字（${r.updated?'覆盖了旧的':'新建'}）`;
+        o.style.color='var(--ok)';
+        setTimeout(()=>{ closeDrawer(); render(); }, 900);
+      }catch(e){ o.textContent='✗ '+e.message; o.style.color='var(--err)'; }
+    };
+  };
   c.querySelectorAll('[data-per-edit]').forEach(el=>{
     el.onclick=()=>openEditor(items.find(x=>x.id===el.dataset.perEdit));
   });

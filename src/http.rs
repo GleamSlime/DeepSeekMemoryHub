@@ -3699,6 +3699,17 @@ struct NormalizeNamesOut {
     ok: bool,
     text: String,
     replacements: Vec<NameReplacementOut>,
+    /// 中枢**认识的全部称呼**（别名 + 显示名）。
+    ///
+    /// 为什么要把这张表回给调用方：`replacements` 只列出**这次被替换过**的名字，
+    /// 于是调用方无从判断"这个词是未知的"还是"已知但这次没出现"。
+    /// 2026-11-02 的「鹬鹬」就是这样漏掉的：模型同音写错了名字，
+    /// 中枢不认识它 → 不替换 → 调用方看 `replacements` 是空的，
+    /// 以为一切正常，直到事后听录音才发现。
+    ///
+    /// 有了这张表，接入方可以自己判定"文本里出现了像人名但不在名单里的东西"，
+    /// 从而在**文本层**发现问题，而不必事后翻语音文件。
+    known: Vec<String>,
 }
 
 /// 把回复文本里的「场景称呼」替换成身份显示名。
@@ -3732,9 +3743,21 @@ async fn normalize_names(
     let scene = scene.map(str::to_string);
 
     let db = st.db.clone();
-    let (text, hits) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (text, hits, known) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mappings = crate::query::name_mappings(&db, scene.as_deref())?;
-        Ok(crate::query::replace_names(&b.text, &mappings))
+        // 先把"认识的全部称呼"取出来，再消费 mappings 做替换 ——
+        // 顺序不能反（`replace_names` 拿走所有权）。
+        let mut known: Vec<String> = Vec::new();
+        for m in &mappings {
+            if !known.iter().any(|k| k == &m.from) {
+                known.push(m.from.clone());
+            }
+            if !known.iter().any(|k| k == &m.to) {
+                known.push(m.to.clone());
+            }
+        }
+        let (t, h) = crate::query::replace_names(&b.text, &mappings);
+        Ok((t, h, known))
     })
     .await
     .map_err(|e| Error::Storage(format!("称呼归一失败：{e}")))??;
@@ -3746,6 +3769,7 @@ async fn normalize_names(
             .into_iter()
             .map(|(from, to, count)| NameReplacementOut { from, to, count })
             .collect(),
+        known,
     }))
 }
 
